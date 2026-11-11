@@ -19,6 +19,7 @@ class Message:
 
 
 class Broker(Protocol):
+    async def ping(self) -> None: ...
     async def ensure_group(self) -> None: ...
     async def read(self, consumer: str, count: int, block_ms: int) -> list[Message]: ...
     async def autoclaim(self, consumer: str, min_idle_ms: int, count: int) -> list[Message]: ...
@@ -46,6 +47,9 @@ class RedisBroker:
         self._group = group
         self._dead_stream = dead_stream
         self._autoclaim_cursor = "0-0"
+
+    async def ping(self) -> None:
+        await self._r.ping()
 
     async def ensure_group(self) -> None:
         # id="0": after a Redis wipe, the group must also see entries the dispatcher published

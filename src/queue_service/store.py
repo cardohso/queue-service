@@ -44,6 +44,7 @@ class DispatchItem:
 
 
 class Store(Protocol):
+    async def ping(self) -> None: ...
     async def claim(
         self, job_id: UUID, epoch: int, worker_id: str, lease_s: float
     ) -> Claim | Rejected: ...
@@ -71,6 +72,10 @@ class PgStore:
     def __init__(self, pool: asyncpg.Pool[Any], acquire_timeout_s: float) -> None:
         self._pool = pool
         self._timeout = acquire_timeout_s
+
+    async def ping(self) -> None:
+        async with self._pool.acquire(timeout=self._timeout) as conn:
+            await conn.execute("SELECT 1")
 
     async def claim(
         self, job_id: UUID, epoch: int, worker_id: str, lease_s: float

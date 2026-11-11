@@ -70,6 +70,9 @@ class FakeStore:
         if self.down:
             raise Down("postgres unavailable")
 
+    async def ping(self) -> None:
+        self._check()
+
     # -- what the API does (not part of the Store protocol) --
 
     def accept(self, type_: str, payload: dict[str, Any], max_attempts: int) -> UUID:
@@ -290,6 +293,9 @@ class FakeBroker:
     def _msg(self, seq: int) -> Message:
         job_id, epoch = self.stream[seq]
         return Message(self._id(seq), job_id, epoch)
+
+    async def ping(self) -> None:
+        self._check()
 
     async def ensure_group(self) -> None:
         self._check()

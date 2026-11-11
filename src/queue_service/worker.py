@@ -10,6 +10,7 @@ import contextlib
 import logging
 import random
 import socket
+import time
 import uuid
 from collections import Counter
 from typing import Protocol
@@ -19,6 +20,8 @@ from redis.exceptions import RedisError
 from queue_service.broker import Broker, Message
 from queue_service.config import Settings
 from queue_service.errors import DB_INFRA_ERRORS
+from queue_service.logs import bind_job
+from queue_service.metrics import LoopLag, WorkerMetrics, job_kind
 from queue_service.retry import Decision, decide_failure, decide_success
 from queue_service.store import Claim, Rejected, Store
 
@@ -45,6 +48,7 @@ class Worker:
         *,
         worker_id: str | None = None,
         rng: random.Random | None = None,
+        metrics: WorkerMetrics | None = None,
     ) -> None:
         self._s = settings
         self._store = store
@@ -57,8 +61,31 @@ class Worker:
         self._stopping = asyncio.Event()
         self._db_backoff_s = 0.0
         self._db_paused_until = 0.0
-        # Counters for tests now and Prometheus in step 6.
+        self.metrics = metrics or WorkerMetrics()
+        self.loop_lag = LoopLag(self.metrics.loop_lag)
+        # Same events as the Prometheus counters; handy for tests and the exit log line.
         self.stats: Counter[str] = Counter()
+
+    def _count(self, name: str, n: int = 1) -> None:
+        self.stats[name] += n
+        if (counter := self.metrics.simple_counter(name)) is not None:
+            counter.inc(n)
+
+    # ---- health ----------------------------------------------------------------------
+
+    def alive(self) -> bool:
+        """Liveness: the event loop is still turning (not blocked or deadlocked)."""
+        return self.loop_lag.is_alive()
+
+    async def ready(self) -> bool:
+        """Readiness: able to do useful work: not draining, Postgres and Redis reachable."""
+        if self._stopping.is_set():
+            return False
+        try:
+            await asyncio.gather(self._store.ping(), self._broker.ping())
+        except (*DB_INFRA_ERRORS, *REDIS_INFRA_ERRORS):
+            return False
+        return True
 
     # ---- lifecycle -------------------------------------------------------------------
 
@@ -72,6 +99,7 @@ class Worker:
         return len(self._in_flight)
 
     async def run(self) -> None:
+        lag_task = asyncio.create_task(self.loop_lag.run(), name="loop-lag")
         await self._ensure_group()
         loops = [
             asyncio.create_task(self._fetch_loop(), name="fetch"),
@@ -83,6 +111,7 @@ class Worker:
         # our PEL until the lease expires.
         await asyncio.gather(*loops)
         await self._drain()
+        lag_task.cancel()
 
     async def _drain(self) -> None:
         if not self._in_flight:
@@ -98,8 +127,8 @@ class Worker:
             try:
                 await self._broker.ensure_group()
                 return
-            except REDIS_INFRA_ERRORS:
-                log.warning("ensure_group_failed")
+            except REDIS_INFRA_ERRORS as exc:
+                log.warning("ensure_group_failed", extra={"error": repr(exc)})
                 await self._sleep_or_stop(delay)
                 delay = min(delay * 2, 5.0)
 
@@ -120,8 +149,8 @@ class Worker:
             try:
                 messages = await self._broker.read(self.worker_id, free, self._s.block_ms)
                 redis_delay = 0.1
-            except REDIS_INFRA_ERRORS:
-                log.warning("read_failed")
+            except REDIS_INFRA_ERRORS as exc:
+                log.warning("read_failed", extra={"error": repr(exc)})
                 await self._sleep_or_stop(redis_delay)
                 redis_delay = min(redis_delay * 2, 5.0)
                 continue
@@ -138,10 +167,10 @@ class Worker:
                 messages = await self._broker.autoclaim(
                     self.worker_id, int(self._s.lease_s * 1000), free
                 )
-            except REDIS_INFRA_ERRORS:
-                log.warning("autoclaim_failed")
+            except REDIS_INFRA_ERRORS as exc:
+                log.warning("autoclaim_failed", extra={"error": repr(exc)})
                 continue
-            self.stats["reclaimed"] += len(messages)
+            self._count("reclaimed", len(messages))
             for m in messages:
                 self._spawn(m)
 
@@ -152,8 +181,8 @@ class Worker:
                 break
             try:
                 await self.dispatch_once()
-            except (*DB_INFRA_ERRORS, *REDIS_INFRA_ERRORS):
-                log.warning("dispatch_failed")
+            except (*DB_INFRA_ERRORS, *REDIS_INFRA_ERRORS) as exc:
+                log.warning("dispatch_failed", extra={"error": repr(exc)})
 
     async def dispatch_once(self) -> int:
         """Publish due retries and jobs whose stream entry is provably gone."""
@@ -172,7 +201,7 @@ class Worker:
             entry_id = await self._broker.publish(item.job_id, item.epoch)
             await self._store.set_entry(item.job_id, item.epoch, entry_id)
             published += 1
-        self.stats["republished"] += published
+        self._count("republished", published)
         return published
 
     # ---- one message -----------------------------------------------------------------
@@ -192,26 +221,37 @@ class Worker:
         if message.job_id is None:
             await self._ack_quietly(message)
             return
+        bind_job(job_id=str(message.job_id), epoch=message.epoch, worker_id=self.worker_id)
         # Step 2: claim. If the DB is down we leave the entry in our PEL (no ack, no attempt
         # charged) and pause fetching; it is reclaimed after the lease.
         try:
             claimed = await self._store.claim(
                 message.job_id, message.epoch, self.worker_id, self._s.lease_s
             )
-        except DB_INFRA_ERRORS:
+        except DB_INFRA_ERRORS as exc:
             self._db_failed()
+            log.warning("claim_db_unavailable", extra={"error": repr(exc)})
             return
         self._db_ok()
 
         if isinstance(claimed, Rejected):
             if claimed.dead_lettered:
                 self.stats["dead"] += 1
+                self.metrics.jobs.labels("dead").inc()
+                self.metrics.dead.labels("crashed_max_attempts").inc()
+                log.warning("job_dead", extra={"reason": "crashed_max_attempts"})
                 await self._publish_dead_quietly(message, claimed.reason)
             else:
-                self.stats["duplicate_deliveries"] += 1
+                self._count("duplicate_deliveries")
+                log.info("duplicate_delivery", extra={"reason": claimed.reason})
             await self._ack_quietly(message)
             return
 
+        bind_job(attempt=claimed.attempt, type=claimed.type)
+        kind = job_kind(claimed.type)
+        in_flight = self.metrics.in_flight.labels(kind)
+        in_flight.inc()
+        started = time.monotonic()
         # Step 3: execute, with a heartbeat that keeps the lease and the PEL entry fresh.
         heartbeat = asyncio.create_task(self._heartbeat(claimed, message))
         try:
@@ -223,18 +263,36 @@ class Worker:
             raise
         finally:
             heartbeat.cancel()
+            in_flight.dec()
+        duration = time.monotonic() - started
 
         # Step 4: fenced commit. Steps 5-6: DLQ copy, then ack.
         committed = await self._commit(claimed, decision)
         if committed is None:
             return  # gave up: lease expiry hands the job to someone else; nothing acked
         if not committed:
-            self.stats["fenced_writes"] += 1
-            log.warning("fenced_out", extra={"job_id": str(claimed.job_id)})
+            self._count("fenced_writes")
+            log.warning("fenced_out")
         else:
             self.stats[decision.kind] += 1
+            self.metrics.jobs.labels(decision.kind).inc()
+            self.metrics.duration.labels(kind, decision.kind).observe(duration)
+            if decision.kind == "retry":
+                self.metrics.retries.labels(decision.error_class or "unknown").inc()
+            log.info(
+                "job_finished",
+                extra={
+                    "outcome": decision.kind,
+                    "duration_ms": round(duration * 1000, 1),
+                    "error_class": decision.error_class,
+                    "retry_in_s": round(decision.delay_s, 3) if decision.kind == "retry" else None,
+                },
+            )
             if decision.kind == "dead":
-                await self._publish_dead_quietly(message, decision.reason or "unknown")
+                reason = decision.reason or "unknown"
+                self.metrics.dead.labels(reason).inc()
+                log.warning("job_dead", extra={"reason": reason, "error": decision.error})
+                await self._publish_dead_quietly(message, reason)
         await self._ack_quietly(message)
 
     async def _execute(self, claim: Claim) -> Decision:
@@ -269,7 +327,7 @@ class Worker:
             except DB_INFRA_ERRORS:
                 if loop.time() + delay > deadline:
                     log.error("commit_gave_up", extra={"job_id": str(claim.job_id)})
-                    self.stats["commit_gave_up"] += 1
+                    self._count("commit_gave_up")
                     return None
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 1.0)
@@ -283,7 +341,7 @@ class Worker:
                 continue
             if not still_ours:
                 # Someone took over. Our commit will be fenced out; let the job finish.
-                self.stats["lost_lease"] += 1
+                self._count("lost_lease")
                 return
             with contextlib.suppress(*REDIS_INFRA_ERRORS):
                 await self._broker.touch(self.worker_id, [message.entry_id])
@@ -298,32 +356,33 @@ class Worker:
             if await self._store.release(claim):
                 entry_id = await self._broker.publish(claim.job_id, claim.epoch)
                 await self._store.set_entry(claim.job_id, claim.epoch, entry_id)
-                self.stats["released"] += 1
+                self._count("released")
+                self.metrics.jobs.labels("released").inc()
             await self._broker.ack(message.entry_id)
-        except (*DB_INFRA_ERRORS, *REDIS_INFRA_ERRORS):
-            log.warning("release_failed", extra={"job_id": str(claim.job_id)})
+        except (*DB_INFRA_ERRORS, *REDIS_INFRA_ERRORS) as exc:
+            log.warning("release_failed", extra={"error": repr(exc)})
 
     # ---- helpers ---------------------------------------------------------------------
 
     async def _ack_quietly(self, message: Message) -> None:
         try:
             await self._broker.ack(message.entry_id)
-        except REDIS_INFRA_ERRORS:
+        except REDIS_INFRA_ERRORS as exc:
             # Safe: the entry stays in our PEL, gets reclaimed, and the claim rejects it.
-            log.warning("ack_failed", extra={"entry_id": message.entry_id})
+            log.warning("ack_failed", extra={"entry_id": message.entry_id, "error": repr(exc)})
 
     async def _publish_dead_quietly(self, message: Message, reason: str) -> None:
         if message.job_id is None:
             return
         try:
             await self._broker.publish_dead(message.job_id, message.epoch, reason)
-        except REDIS_INFRA_ERRORS:
-            log.warning("dlq_publish_failed", extra={"job_id": str(message.job_id)})
+        except REDIS_INFRA_ERRORS as exc:
+            log.warning("dlq_publish_failed", extra={"error": repr(exc)})
 
     def _db_failed(self) -> None:
         self._db_backoff_s = min(max(self._db_backoff_s * 2, 0.1), 5.0)
         self._db_paused_until = asyncio.get_running_loop().time() + self._db_backoff_s
-        self.stats["db_unavailable"] += 1
+        self._count("db_unavailable")
 
     def _db_ok(self) -> None:
         self._db_backoff_s = 0.0

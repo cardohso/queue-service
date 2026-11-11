@@ -10,7 +10,8 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import asyncpg
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
 from queue_service.admission import Admission, DepthSampler
@@ -22,6 +23,7 @@ from queue_service.ingest import (
     accept_job,
     mark_dispatched,
 )
+from queue_service.metrics import ApiMetrics, LoopLag
 from queue_service.schemas import JobAccepted, JobRequest, JobStatus
 
 log = logging.getLogger(__name__)
@@ -37,6 +39,8 @@ class Deps:
     publisher: RedisPublisher
     admission: Admission
     sampler: DepthSampler
+    metrics: ApiMetrics
+    loop_lag: LoopLag
 
 
 @asynccontextmanager
@@ -50,7 +54,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         socket_connect_timeout=settings.redis_timeout_s,
         socket_timeout=settings.redis_timeout_s,
     )
-    admission = Admission(settings.max_depth, settings.assumed_drain_per_s)
+    metrics = ApiMetrics()
+    admission = Admission(
+        settings.max_depth, settings.assumed_drain_per_s, on_update=metrics.record_depth
+    )
+    loop_lag = LoopLag(metrics.loop_lag)
     sampler = DepthSampler(
         admission=admission,
         redis=redis,
@@ -60,16 +68,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         interval_s=settings.sample_interval_s,
     )
     app.state.deps = Deps(
-        settings, pool, redis, RedisPublisher(redis, settings.stream), admission, sampler
+        settings,
+        pool,
+        redis,
+        RedisPublisher(redis, settings.stream),
+        admission,
+        sampler,
+        metrics,
+        loop_lag,
     )
     await sampler.sample_once()
-    task = asyncio.create_task(sampler.run())
+    tasks = [asyncio.create_task(sampler.run()), asyncio.create_task(loop_lag.run())]
     try:
         yield
     finally:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         await redis.aclose()
         await pool.close()
 
@@ -87,6 +104,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deps: Deps = request.app.state.deps
         retry_after = deps.admission.retry_after()
         if retry_after is not None:
+            deps.metrics.rejected.labels("429").inc()
             raise HTTPException(
                 429,
                 detail=f"queue depth {deps.admission.depth} over limit",
@@ -101,18 +119,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 acquire_timeout_s=deps.settings.db_acquire_timeout_s,
             )
         except IdempotencyConflict:
+            deps.metrics.rejected.labels("409").inc()
             raise HTTPException(
                 409, detail="Idempotency-Key reused with a different body"
             ) from None
         except _DB_ERRORS:
             log.exception("accept_failed")
+            deps.metrics.rejected.labels("503").inc()
             raise HTTPException(
                 503, detail="database unavailable", headers={"Retry-After": "1"}
             ) from None
 
         # The job is durable. Dispatch is best-effort: if Redis is down or we crash here,
         # the dispatcher republishes it from Postgres (DESIGN.md s5.3).
+        if not accepted.created:
+            deps.metrics.replays.inc()
         if accepted.created:
+            deps.metrics.accepted.inc()
             entry_id = await deps.publisher.publish(accepted.job_id, accepted.epoch)
             if entry_id is not None:
                 await mark_dispatched(
@@ -142,5 +165,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             attempts=row["attempts"],
             epoch=row["epoch"],
         )
+
+    @app.get("/healthz")
+    async def healthz(request: Request) -> Response:
+        """Liveness: the event loop answers and has not been blocked for seconds."""
+        alive = request.app.state.deps.loop_lag.is_alive()
+        return Response(
+            "ok\n" if alive else "event loop stalled\n", status_code=200 if alive else 503
+        )
+
+    @app.get("/readyz")
+    async def readyz(request: Request) -> Response:
+        """Readiness = can accept jobs = Postgres reachable.
+
+        Redis is reported but does NOT gate readiness: with Postgres as the source of truth
+        the API keeps accepting while Redis is down (DESIGN.md s7). Failing readiness on a
+        Redis blip would take every API pod out of rotation for no benefit.
+        """
+        deps: Deps = request.app.state.deps
+        try:
+            async with deps.pool.acquire(timeout=deps.settings.db_acquire_timeout_s) as conn:
+                await conn.execute("SELECT 1")
+        except _DB_ERRORS:
+            return Response("postgres unavailable\n", status_code=503)
+        redis_state = "ok" if deps.admission.source == "redis" else "degraded"
+        return Response(f"ok redis={redis_state}\n", status_code=200)
+
+    @app.get("/metrics")
+    async def metrics(request: Request) -> Response:
+        reg = request.app.state.deps.metrics.registry
+        return Response(generate_latest(reg), media_type=CONTENT_TYPE_LATEST)
 
     return app

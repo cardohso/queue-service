@@ -1,7 +1,7 @@
 """Runtime settings, read from environment variables with local-dev defaults."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +23,15 @@ class Settings:
     # Short timeouts so a dead Redis can never stall request handling.
     redis_timeout_s: float = 0.5
     max_attempts: int = 5
+
+    # --- serving and logging ---
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
+    # Worker /metrics, /healthz, /readyz. Loopback by default; containers set 0.0.0.0.
+    ops_host: str = "127.0.0.1"
+    ops_port: int = 9100
+    log_level: str = "INFO"
+    log_json: bool = True
 
     # --- worker (DESIGN.md s5.2-s10) ---
     dead_stream: str = "jobs:dead"
@@ -48,21 +57,21 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
-        d = cls()
-        return cls(
-            database_url=os.environ.get("QS_DATABASE_URL", d.database_url),
-            redis_url=os.environ.get("QS_REDIS_URL", d.redis_url),
-            stream=os.environ.get("QS_STREAM", d.stream),
-            group=os.environ.get("QS_GROUP", d.group),
-            max_depth=int(os.environ.get("QS_MAX_DEPTH", d.max_depth)),
-            sample_interval_s=float(os.environ.get("QS_SAMPLE_INTERVAL_S", d.sample_interval_s)),
-            assumed_drain_per_s=float(
-                os.environ.get("QS_ASSUMED_DRAIN_PER_S", d.assumed_drain_per_s)
-            ),
-            db_acquire_timeout_s=float(
-                os.environ.get("QS_DB_ACQUIRE_TIMEOUT_S", d.db_acquire_timeout_s)
-            ),
-            db_pool_max_size=int(os.environ.get("QS_DB_POOL_MAX_SIZE", d.db_pool_max_size)),
-            redis_timeout_s=float(os.environ.get("QS_REDIS_TIMEOUT_S", d.redis_timeout_s)),
-            max_attempts=int(os.environ.get("QS_MAX_ATTEMPTS", d.max_attempts)),
-        )
+        """Every field can be overridden with ``QS_<FIELD_NAME_UPPERCASE>``, e.g. QS_LEASE_S."""
+        values: dict[str, object] = {}
+        for f in fields(cls):
+            raw = os.environ.get(f"QS_{f.name.upper()}")
+            if raw is None:
+                continue
+            # Python 3.14 evaluates annotations lazily: f.type is the class, not a string.
+            if f.type is bool:
+                values[f.name] = raw.lower() not in ("0", "false", "no", "")
+            elif f.type is int:
+                values[f.name] = int(raw)
+            elif f.type is float:
+                values[f.name] = float(raw)
+            elif f.type is str:
+                values[f.name] = raw
+            else:
+                raise TypeError(f"unsupported settings type for {f.name}: {f.type!r}")
+        return cls(**values)  # type: ignore[arg-type]

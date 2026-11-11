@@ -7,6 +7,7 @@ is therefore soft: depth can overshoot by whatever is accepted between two sampl
 import asyncio
 import logging
 import math
+from collections.abc import Callable
 from typing import Any
 
 import asyncpg
@@ -19,15 +20,23 @@ MAX_RETRY_AFTER_S = 30
 
 
 class Admission:
-    def __init__(self, max_depth: int, drain_per_s: float) -> None:
+    def __init__(
+        self,
+        max_depth: int,
+        drain_per_s: float,
+        on_update: Callable[[int, str], None] | None = None,
+    ) -> None:
         self._max_depth = max_depth
         self._drain_per_s = drain_per_s
+        self._on_update = on_update
         self.depth = 0
         self.source = "none"
 
     def update(self, depth: int, source: str) -> None:
         self.depth = depth
         self.source = source
+        if self._on_update is not None:
+            self._on_update(depth, source)
 
     def retry_after(self) -> int | None:
         """Seconds the client should wait, or None to admit the request."""

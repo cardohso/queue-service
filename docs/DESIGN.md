@@ -262,12 +262,42 @@ A `kill -9` skips all of this; that path is covered by §9.
 
 ## 11. Observability (needed by phase 2)
 
-Prometheus: `queue_lag`, `queue_pending`, `jobs_in_flight{kind}`, `jobs_total{outcome}`,
-`job_duration_seconds` histogram, `job_retries_total{error_class}`, `dead_letter_total`,
-`event_loop_lag_seconds` histogram, `duplicate_deliveries_total`, `fenced_writes_total`,
-`dispatcher_republished_total`, `http_429_total`. JSON logs (structlog) with `job_id`,
-`epoch`, `attempt`, `worker_id`. `/healthz` = process alive; `/readyz` = PG + Redis
-reachable and not draining.
+*Revised in step 6.* One Prometheus registry per component. The names below are the phase-2
+contract (alerts, dashboard, KEDA), so renaming one is a breaking change.
+
+| Metric | Type | Labels | Exported by | Meaning |
+|---|---|---|---|---|
+| `qs_queue_depth` | gauge | `source` redis/postgres | API | Sampled depth used for admission (lag + pending) |
+| `qs_jobs_in_flight` | gauge | `kind` io/cpu | worker | Jobs executing now |
+| `qs_jobs_total` | counter | `outcome` done/retry/dead/released | worker | Attempt outcomes; `rate(done)` is throughput |
+| `qs_job_duration_seconds` | histogram | `kind`, `outcome` | worker | One attempt, claim to decision |
+| `qs_job_retries_total` | counter | `error_class` | worker | Retries by exception type |
+| `qs_dead_letter_total` | counter | `reason` permanent/exhausted/crashed_max_attempts | worker | Alert on growth |
+| `qs_duplicate_deliveries_total` | counter | | worker | Redeliveries absorbed by the claim |
+| `qs_fenced_writes_total` | counter | | worker | Zombie commits rejected |
+| `qs_reclaimed_total`, `qs_lost_lease_total` | counter | | worker | Crash recovery activity |
+| `qs_dispatcher_republished_total` | counter | | worker | Retries due + lost dispatches |
+| `qs_db_unavailable_total`, `qs_commit_gave_up_total` | counter | | worker | Postgres trouble |
+| `qs_event_loop_lag_seconds` | histogram | | both | Lateness of a 100 ms sleep; proves CPU work is off the loop |
+| `qs_api_jobs_accepted_total`, `qs_api_idempotent_replays_total` | counter | | API | |
+| `qs_api_rejected_total` | counter | `code` 409/429/503 | API | |
+
+**Health endpoints (API on the app port, worker on `QS_OPS_PORT`):**
+
+- `/healthz` (liveness) fails only if the event loop has not turned for 5 s. It deliberately
+  does **not** check Postgres or Redis: restarting a pod does not fix a dependency, and a
+  liveness probe that fails on a dependency turns an outage into a restart storm.
+- `/readyz` (readiness), API: Postgres reachable. Redis is *reported* (`redis=ok|degraded`)
+  but does not gate readiness, because the API accepts while Redis is down (section 7).
+- `/readyz`, worker: Postgres and Redis reachable and not draining.
+
+> Interview version: "Liveness answers 'is this process stuck?', readiness answers 'can it do
+> useful work right now?'. Mixing them is how a database blip becomes a restart loop."
+
+**Logs:** one JSON object per line (structlog over stdlib). `job_id`, `epoch`, `attempt`,
+`worker_id` are bound per message with contextvars, so every line a message produces carries
+them, and concurrent jobs can't leak context into each other (each asyncio task has its own).
+Infrastructure warnings include the exception: a bare `read_failed` once hid a config bug.
 
 ## 12. Testing strategy
 
