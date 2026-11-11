@@ -285,6 +285,19 @@ against fakes and real services.
 3. **Contract tests:** the same test suite against `FakeBroker` and real Redis, so
    fakes can't drift from real `XAUTOCLAIM`/PEL semantics (this is how property tests
    "pass for the wrong reason").
+   *Findings from step 5 (mutation testing the property test):*
+   - The model only proves something if it is deterministic. A wall-clock timeout, random
+     UUIDs, an unseeded back-off RNG and a real-time heartbeat each made Hypothesis replays
+     diverge (`FlakyStrategyDefinition`), and early "caught" mutants were really that crash.
+     The model now uses event-based waits, sequential IDs, seeded RNGs, and no heartbeat
+     (every lease runs out unless the job finishes: the harsher case).
+   - Coverage is measured, not assumed: `--hypothesis-show-statistics` reports how often
+     each fault path ran (fenced writes, crash loops, wipes with work in flight, replays).
+   - **Defense in depth, observed:** acking *before* the commit, or after a failed claim or
+     commit, still loses no job. The dispatcher sees a `running` job with an expired lease
+     and no stream entry, and re-publishes it. Ack order therefore decides recovery *speed*
+     (one lease vs. lease + grace), while the dispatcher is the second, independent
+     guarantee of no loss.
 4. **Integration:** testcontainers (Redis, Postgres) in CI.
 5. **Failure tests** (each reports duplicates and recovery time, then checks the invariant
    with SQL):
