@@ -102,7 +102,13 @@ class FakeStore:
     # -- Store protocol --
 
     async def claim(
-        self, job_id: UUID, epoch: int, worker_id: str, lease_s: float
+        self,
+        job_id: UUID,
+        epoch: int,
+        worker_id: str,
+        lease_s: float,
+        *,
+        allow_takeover: bool = True,
     ) -> Claim | Rejected:
         self._check()
         now = self.clock.now()
@@ -117,6 +123,8 @@ class FakeStore:
             return Rejected("running_elsewhere")
         if job.state != "queued" and not takeover:
             return Rejected(job.state)
+        if takeover and not allow_takeover:
+            return Rejected("needs_isolation")
         if takeover:
             prev = self.attempts.get((job_id, epoch, job.attempts))
             if prev is not None and prev.outcome is None:

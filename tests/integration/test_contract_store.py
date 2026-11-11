@@ -172,6 +172,18 @@ async def test_takeover_after_expiry_fences_out_the_old_holder(b: Backend) -> No
     assert await b.store.complete(new, {}) is True
 
 
+async def test_takeover_can_be_refused_and_then_nothing_changes(b: Backend) -> None:
+    job_id = await b.accept()
+    await _claim(b, job_id, "crashed")
+    await b.expire_lease(job_id)
+    before = await b.job(job_id)
+    assert await b.store.claim(job_id, 1, "w2", LEASE, allow_takeover=False) == Rejected(
+        "needs_isolation"
+    )
+    assert await b.job(job_id) == before  # no attempt charged, still the crashed holder's
+    assert (await b.store.claim(job_id, 1, "w2", LEASE, allow_takeover=True)).attempt == 2  # type: ignore[union-attr]
+
+
 async def test_takeover_on_last_attempt_dead_letters(b: Backend) -> None:
     job_id = await b.accept(max_attempts=1)
     await _claim(b, job_id)

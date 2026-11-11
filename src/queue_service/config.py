@@ -34,6 +34,9 @@ class Settings:
     log_json: bool = True
 
     # --- worker (DESIGN.md s5.2-s10) ---
+    worker_id: str = ""  # empty: hostname + random suffix
+    # Accept/execute the `poison` job type. Off by default: it can kill workers on purpose.
+    fault_injection: bool = False
     dead_stream: str = "jobs:dead"
     max_in_flight: int = 32
     cpu_workers: int = os.cpu_count() or 2

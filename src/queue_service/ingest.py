@@ -9,7 +9,7 @@ import asyncpg
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from queue_service.schemas import CpuHashJob, FailJob, IoSleepJob, request_hash
+from queue_service.schemas import AnyJob, request_hash
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class Accepted:
 
 async def accept_job(
     pool: asyncpg.Pool[Any],
-    job: IoSleepJob | CpuHashJob | FailJob,
+    job: AnyJob,
     idempotency_key: str | None,
     *,
     max_attempts: int,

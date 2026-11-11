@@ -9,12 +9,13 @@ Why pebble instead of ``concurrent.futures.ProcessPoolExecutor``:
 
 import asyncio
 import hashlib
+import os
 from typing import Any
 
 from pebble import ProcessPool
 
 from queue_service.errors import PermanentError, TransientError
-from queue_service.schemas import CpuHashPayload, FailPayload, IoSleepPayload
+from queue_service.schemas import CpuHashPayload, FailPayload, IoSleepPayload, PoisonPayload
 from queue_service.store import Claim
 
 
@@ -26,9 +27,19 @@ def cpu_hash(iterations: int) -> str:
     return digest.hex()
 
 
+def _child_exit() -> str:
+    os._exit(1)  # the child dies without a Python exception: like a segfault or OOM kill
+
+
+def _spin() -> str:
+    while True:
+        pass
+
+
 class Executor:
-    def __init__(self, cpu_workers: int) -> None:
+    def __init__(self, cpu_workers: int, *, fault_injection: bool = False) -> None:
         self._pool = ProcessPool(max_workers=cpu_workers)
+        self._fault_injection = fault_injection
 
     async def run(self, claim: Claim, timeout_s: float) -> dict[str, Any]:
         if claim.type == "io_sleep":
@@ -50,6 +61,17 @@ class Executor:
             if claim.attempt <= f.failures:
                 raise TransientError(f"injected transient failure {claim.attempt}/{f.failures}")
             return {"succeeded_on_attempt": claim.attempt}
+
+        if claim.type == "poison":
+            if not self._fault_injection:
+                raise PermanentError("fault injection is disabled on this worker")
+            p = PoisonPayload.model_validate(claim.payload)
+            if p.mode == "worker_exit":
+                os._exit(137)  # the whole worker dies mid-job, like kill -9 / OOM
+            target = _child_exit if p.mode == "child_exit" else _spin
+            future = self._pool.schedule(target, timeout=timeout_s)
+            await asyncio.wrap_future(future)
+            return {}
 
         raise PermanentError(f"unknown job type {claim.type!r}")
 

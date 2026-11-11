@@ -42,6 +42,9 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/failure/*" = ["E501"]  # long inline SQL reads better unwrapped
+
 [tool.mypy]
 strict = true
 python_version = "3.14"
@@ -51,4 +54,8 @@ files = ["src", "tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-markers = ["integration: needs real Redis and Postgres (Docker)"]
+markers = [
+    "integration: needs real Redis and Postgres (Docker)",
+    "failure: real fault injection with containers and processes (slow)",
+]
+addopts = "-m 'not failure'"

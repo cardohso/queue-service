@@ -102,6 +102,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
     ) -> JobAccepted:
         deps: Deps = request.app.state.deps
+        if job.type == "poison" and not deps.settings.fault_injection:
+            raise HTTPException(422, detail="fault injection is disabled")
         retry_after = deps.admission.retry_after()
         if retry_after is not None:
             deps.metrics.rejected.labels("429").inc()

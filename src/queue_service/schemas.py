@@ -57,7 +57,25 @@ class FailJob(_Strict):
     payload: FailPayload
 
 
-JobRequest = Annotated[IoSleepJob | CpuHashJob | FailJob, Field(discriminator="type")]
+class PoisonPayload(_Strict):
+    """Fault injection for the failure tests. Rejected unless QS_FAULT_INJECTION=1.
+
+    child_exit:  the CPU child process dies (segfault/OOM-kill of a child)
+    worker_exit: the worker process itself dies (the job crash-loops every worker that runs it)
+    hang:        the CPU child spins forever (only the timeout can stop it)
+    """
+
+    mode: Literal["child_exit", "worker_exit", "hang"]
+
+
+class PoisonJob(_Strict):
+    type: Literal["poison"]
+    schema_version: Literal[1]
+    payload: PoisonPayload
+
+
+AnyJob = IoSleepJob | CpuHashJob | FailJob | PoisonJob
+JobRequest = Annotated[AnyJob, Field(discriminator="type")]
 
 
 class JobAccepted(BaseModel):
@@ -73,7 +91,7 @@ class JobStatus(BaseModel):
     epoch: int
 
 
-def request_hash(job: IoSleepJob | CpuHashJob | FailJob) -> str:
+def request_hash(job: AnyJob) -> str:
     """Stable fingerprint of a request, used to detect idempotency-key reuse with a new body."""
     canonical = json.dumps(job.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()

@@ -98,6 +98,11 @@ class WorkerMetrics:
             "Jobs the dispatcher published (due retries and lost dispatches).",
             registry=r,
         )
+        self.isolated = Counter(
+            "qs_isolated_runs_total",
+            "Jobs run alone because their previous attempt crashed a worker.",
+            registry=r,
+        )
         self.lost_lease = Counter(
             "qs_lost_lease_total", "Heartbeats that found the lease taken over.", registry=r
         )
@@ -124,6 +129,7 @@ class WorkerMetrics:
             "reclaimed": self.reclaimed,
             "republished": self.republished,
             "lost_lease": self.lost_lease,
+            "isolated_runs": self.isolated,
             "commit_gave_up": self.commit_gave_up,
             "db_unavailable": self.db_unavailable,
         }.get(name)

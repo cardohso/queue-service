@@ -17,7 +17,7 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy
-      - run: uv run pytest -m "not integration" --hypothesis-show-statistics
+      - run: uv run pytest -m "not integration and not failure" --hypothesis-show-statistics
         env:
           HYPOTHESIS_PROFILE: ci  # fixed seed: a red build is reproducible
           QS_HYPOTHESIS_EXAMPLES: "1000"

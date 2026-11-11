@@ -246,6 +246,30 @@ extending, so `ttl` only needs to cover "time to notice a dead worker", not "lon
 job". Duplicates then come only from real crashes and pauses longer than `ttl`, and the
 fence makes those harmless.
 
+### 9.1 Isolating suspects (added in step 7)
+
+**Found by a failure test.** "A crash counts as an attempt" stops a poison job crash-looping
+forever, but a crash can't say *which* job caused it. Every job running on the dead worker
+was charged an attempt, and `XAUTOCLAIM` then handed all of them, poison included, to the
+next worker in one batch, which died the same way. Over 5 runs on the unfixed code, 0, 4, 6
+and 7 innocent jobs were dead-lettered as `crashed_max_attempts`; every one had only ever
+crashed next to the poison.
+
+**Fix.** A claim that would be a takeover (the previous attempt's lease expired) is first
+refused (`needs_isolation`, nothing changes). The worker then waits until it runs nothing
+else, stops pulling new work, and runs that job **alone** (writer-preferring readers/writer
+lock: normal jobs shared, suspects exclusive). A poison job then only ever kills itself, and
+an innocent job pays for at most the one crash it happened to share. Five runs after the
+fix: 0 innocent jobs dead-lettered, at most 1 crash charged to any innocent job, poison
+dead-lettered after exactly 3 worker crashes.
+
+**Cost.** Recovery after a crash is slower, because survivors re-run one at a time:
+kill -9 recovery went from 7.0 s to 9.4 s for 8 interrupted jobs (one run each, 2 s lease).
+It is only paid after a crash; normal throughput is unchanged.
+
+> Interview version: "A crash can't tell you who caused it, so I don't guess: survivors are
+> re-run in isolation, and the next crash has exactly one possible culprit."
+
 ## 10. Graceful shutdown (SIGTERM)
 
 1. Stop fetching (readiness → 503 so the k8s Service stops routing; API only).

@@ -32,12 +32,13 @@ async def run_worker(settings: Settings) -> None:
         socket_connect_timeout=settings.worker_redis_timeout_s,
         socket_timeout=settings.worker_redis_timeout_s,
     )
-    executor = Executor(settings.cpu_workers)
+    executor = Executor(settings.cpu_workers, fault_injection=settings.fault_injection)
     worker = Worker(
         settings,
         PgStore(pool, settings.worker_db_acquire_timeout_s),
         RedisBroker(redis, settings.stream, settings.group, settings.dead_stream),
         executor,
+        worker_id=settings.worker_id or None,
     )
 
     async def healthz() -> Response:

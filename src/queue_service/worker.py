@@ -20,6 +20,7 @@ from redis.exceptions import RedisError
 from queue_service.broker import Broker, Message
 from queue_service.config import Settings
 from queue_service.errors import DB_INFRA_ERRORS
+from queue_service.isolation import IsolationLock
 from queue_service.logs import bind_job
 from queue_service.metrics import LoopLag, WorkerMetrics, job_kind
 from queue_service.retry import Decision, decide_failure, decide_success
@@ -59,6 +60,7 @@ class Worker:
         self._in_flight: set[asyncio.Task[None]] = set()
         self._slot_freed = asyncio.Event()
         self._stopping = asyncio.Event()
+        self._isolation = IsolationLock()
         self._db_backoff_s = 0.0
         self._db_paused_until = 0.0
         self.metrics = metrics or WorkerMetrics()
@@ -146,6 +148,13 @@ class Worker:
                 if self._s.max_in_flight - len(self._in_flight) <= 0:
                     await self._slot_freed.wait()
                 continue
+            if self._isolation.isolating:
+                # A suspect job is waiting to run alone: pulling new work onto this worker
+                # would put more jobs next to it if it crashes the process again.
+                self._slot_freed.clear()
+                if self._isolation.isolating:
+                    await self._slot_freed.wait()
+                continue
             try:
                 messages = await self._broker.read(self.worker_id, free, self._s.block_ms)
                 redis_delay = 0.1
@@ -222,18 +231,43 @@ class Worker:
             await self._ack_quietly(message)
             return
         bind_job(job_id=str(message.job_id), epoch=message.epoch, worker_id=self.worker_id)
-        # Step 2: claim. If the DB is down we leave the entry in our PEL (no ack, no attempt
-        # charged) and pause fetching; it is reclaimed after the lease.
+        async with self._isolation.shared():
+            claimed = await self._claim(message, allow_takeover=False)
+            if claimed is None:
+                return
+            if not (isinstance(claimed, Rejected) and claimed.reason == "needs_isolation"):
+                await self._process(message, claimed)
+                return
+        # Its previous attempt crashed a worker, maybe because of this very job. Run it alone
+        # (DESIGN.md s9.1): if it crashes us again, nothing else is running to share the blame.
+        self._count("isolated_runs")
+        log.warning("isolating_suspect_job")
+        async with self._isolation.exclusive():
+            claimed = await self._claim(message, allow_takeover=True)
+            if claimed is None:
+                return
+            await self._process(message, claimed)
+
+    async def _claim(self, message: Message, *, allow_takeover: bool) -> Claim | Rejected | None:
+        """Step 2. None means Postgres is down: the entry stays in our PEL (not acked, no
+        attempt charged) and fetching pauses; it is reclaimed after the lease."""
+        assert message.job_id is not None
         try:
             claimed = await self._store.claim(
-                message.job_id, message.epoch, self.worker_id, self._s.lease_s
+                message.job_id,
+                message.epoch,
+                self.worker_id,
+                self._s.lease_s,
+                allow_takeover=allow_takeover,
             )
         except DB_INFRA_ERRORS as exc:
             self._db_failed()
             log.warning("claim_db_unavailable", extra={"error": repr(exc)})
-            return
+            return None
         self._db_ok()
+        return claimed
 
+    async def _process(self, message: Message, claimed: Claim | Rejected) -> None:
         if isinstance(claimed, Rejected):
             if claimed.dead_lettered:
                 self.stats["dead"] += 1

@@ -32,6 +32,7 @@ class Rejected:
     """The delivery is not ours to run. The message is acked and dropped."""
 
     # missing | stale_epoch | done | dead | retry_wait | running_elsewhere | crashed_out
+    # | needs_isolation (a takeover the caller did not allow: the message is NOT acked)
     reason: str
     dead_lettered: bool = False  # True when this claim attempt itself moved the job to dead
 
@@ -46,7 +47,13 @@ class DispatchItem:
 class Store(Protocol):
     async def ping(self) -> None: ...
     async def claim(
-        self, job_id: UUID, epoch: int, worker_id: str, lease_s: float
+        self,
+        job_id: UUID,
+        epoch: int,
+        worker_id: str,
+        lease_s: float,
+        *,
+        allow_takeover: bool = True,
     ) -> Claim | Rejected: ...
     async def heartbeat(self, claim: Claim, lease_s: float) -> bool: ...
     async def complete(self, claim: Claim, result: dict[str, Any]) -> bool: ...
@@ -78,8 +85,16 @@ class PgStore:
             await conn.execute("SELECT 1")
 
     async def claim(
-        self, job_id: UUID, epoch: int, worker_id: str, lease_s: float
+        self,
+        job_id: UUID,
+        epoch: int,
+        worker_id: str,
+        lease_s: float,
+        *,
+        allow_takeover: bool = True,
     ) -> Claim | Rejected:
+        """Claim a job. A takeover (the previous holder crashed) happens only if allowed;
+        otherwise the job is reported as ``needs_isolation`` and nothing changes."""
         async with self._pool.acquire(timeout=self._timeout) as conn, conn.transaction():
             row = await conn.fetchrow(
                 """
@@ -99,6 +114,8 @@ class PgStore:
                 return Rejected("running_elsewhere")
             if state != "queued" and not takeover:
                 return Rejected(state)
+            if takeover and not allow_takeover:
+                return Rejected("needs_isolation")
 
             if takeover:
                 # The previous holder died (or stalled past its lease). Its attempt counts:
