@@ -24,6 +24,28 @@ class Settings:
     redis_timeout_s: float = 0.5
     max_attempts: int = 5
 
+    # --- worker (DESIGN.md s5.2-s10) ---
+    dead_stream: str = "jobs:dead"
+    max_in_flight: int = 32
+    cpu_workers: int = os.cpu_count() or 2
+    # Lease = visibility timeout. Heartbeat every lease/3 keeps live jobs from being reclaimed.
+    lease_s: float = 30.0
+    job_timeout_s: float = 20.0
+    block_ms: int = 1000
+    reclaim_interval_s: float = 5.0
+    dispatch_interval_s: float = 0.5
+    # A queued job is only checked for a lost stream entry once it is this old.
+    dispatch_grace_s: float = 5.0
+    dispatch_batch: int = 100
+    backoff_base_s: float = 0.5
+    backoff_cap_s: float = 30.0
+    drain_deadline_s: float = 25.0
+    # How long a worker keeps retrying a failed outcome commit before giving up the job to
+    # lease expiry (it then gets redelivered; the fence stops a late double commit).
+    commit_retry_s: float = 10.0
+    worker_db_acquire_timeout_s: float = 2.0
+    worker_redis_timeout_s: float = 5.0  # must exceed block_ms
+
     @classmethod
     def from_env(cls) -> Settings:
         d = cls()

@@ -140,15 +140,39 @@ redelivery, never loss; redelivery is made safe by the conditional claim and fen
 
 ### 5.3 Dispatcher (a loop inside each worker; safe to run N copies)
 
-Every `tick` (e.g. 500 ms), in one transaction with `FOR UPDATE SKIP LOCKED LIMIT k`:
+*Revised in step 4.* Every `dispatch_interval` one statement picks candidates with
+`FOR UPDATE SKIP LOCKED` and stamps `dispatched_at = now()` (a short "dispatch lease", so N
+dispatchers don't publish the same job N times). Candidates:
 
-- `retry_wait` rows with `next_attempt_at <= now()` → `state='queued'`, then `XADD`.
-- `queued` rows with `dispatched_at` older than `dispatch_grace` (or null and
-  `created_at` older than it) → `XADD`, bump `dispatched_at`.
+- `retry_wait` with `next_attempt_at <= now()` → set `queued`, **always** publish.
+- `queued` whose last dispatch is older than `dispatch_grace`.
+- `running` whose lease expired more than `dispatch_grace` ago (the worker died *and* its PEL
+  entry may be gone, e.g. Redis was wiped).
 
-This one loop covers: API crash between commit and `XADD`, Redis data loss, stream
-trimmed by mistake, and delayed retries. Redis Streams has no delayed delivery, and
-sleeping inside the worker would hold an in-flight slot and the PEL entry.
+For the last two, publish **only if the recorded `stream_entry_id` no longer exists**. The
+rule that makes this safe: an entry is deleted in the same `MULTI` as its `XACK`, so
+*an entry that still exists has not been processed yet* and will be delivered or
+reclaimed anyway.
+
+> Interview version: "The first design re-published every queued job older than a few
+> seconds. Under a 10k backlog that multiplies the stream every tick. Recording the entry ID
+> and re-publishing only when the entry is provably gone keeps recovery after a Redis wipe
+> without amplifying load."
+
+Two details this rule depends on (both have tests that fail if broken):
+
+- The consumer group is (re)created at ID `0`, not `$`. After a wipe the API can publish
+  into a group-less stream; a group created at `$` would skip those entries, and the
+  dispatcher would never re-publish them because they exist. They would be stuck forever.
+- Ack is `XACK` + `XDEL` in one `MULTI`, so "exists" never means "acked but not deleted".
+
+This loop covers: API crash between commit and `XADD`, Redis data loss, and delayed retries
+(Redis Streams has no delayed delivery; sleeping in the worker would hold a slot and the PEL
+entry).
+
+**Known gap:** if Postgres is down when a worker *claims*, the entry stays in that worker's
+PEL and is only picked up after `lease_s` (via `XAUTOCLAIM`). Recovery after a DB outage is
+therefore up to one lease, not immediate. Measured in step 7.
 
 ## 6. Retries
 
@@ -226,8 +250,11 @@ fence makes those harmless.
 
 1. Stop fetching (readiness → 503 so the k8s Service stops routing; API only).
 2. Wait for in-flight jobs up to `drain_deadline` (e.g. 25 s).
-3. For jobs still running: cancel; **release** = fenced tx `state='queued', attempts=attempts-1`
-   (shutdown isn't the job's fault), `XADD` new message, then `XACK` old one.
+3. For jobs still running: cancel; **release** = fenced tx `state='queued',
+   max_attempts=max_attempts+1` (shutdown isn't the job's fault), `XADD` new message, then
+   `XACK` old one. *Revised in step 4:* the first draft decremented `attempts`, but
+   `attempts` is the fencing token and must never go backwards (a reused token can let a
+   stale write through). So the budget is refunded instead.
    Crash between `XADD` and `XACK` → duplicate delivery, harmless.
 4. Close pools, exit 0. Phase 2: `terminationGracePeriodSeconds = drain_deadline + 5`.
 

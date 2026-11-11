@@ -112,10 +112,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         # The job is durable. Dispatch is best-effort: if Redis is down or we crash here,
         # the dispatcher republishes it from Postgres (DESIGN.md s5.3).
-        if accepted.created and await deps.publisher.publish(accepted.job_id, accepted.epoch):
-            await mark_dispatched(
-                deps.pool, accepted.job_id, acquire_timeout_s=deps.settings.db_acquire_timeout_s
-            )
+        if accepted.created:
+            entry_id = await deps.publisher.publish(accepted.job_id, accepted.epoch)
+            if entry_id is not None:
+                await mark_dispatched(
+                    deps.pool,
+                    accepted.job_id,
+                    entry_id,
+                    acquire_timeout_s=deps.settings.db_acquire_timeout_s,
+                )
         return JobAccepted(job_id=accepted.job_id, state="queued")
 
     @app.get("/jobs/{job_id}", response_model=JobStatus)

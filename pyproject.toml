@@ -13,6 +13,9 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
 ]
 
+[project.scripts]
+qs = "queue_service.cli:main"
+
 [dependency-groups]
 dev = [
     "asyncpg-stubs>=0.32.0",

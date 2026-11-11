@@ -77,21 +77,29 @@ class RedisPublisher:
         self._redis = redis
         self._stream = stream
 
-    async def publish(self, job_id: UUID, epoch: int) -> bool:
+    async def publish(self, job_id: UUID, epoch: int) -> str | None:
+        """Return the stream entry ID, or None if Redis is unavailable."""
         try:
-            await self._redis.xadd(self._stream, {"job_id": str(job_id), "epoch": str(epoch)})
+            entry_id = await self._redis.xadd(
+                self._stream, {"job_id": str(job_id), "epoch": str(epoch)}
+            )
         except RedisError, OSError, TimeoutError:
             log.warning("dispatch_failed", extra={"job_id": str(job_id)})
-            return False
-        return True
+            return None
+        return str(entry_id)
 
 
 async def mark_dispatched(
-    pool: asyncpg.Pool[Any], job_id: UUID, *, acquire_timeout_s: float
+    pool: asyncpg.Pool[Any], job_id: UUID, entry_id: str, *, acquire_timeout_s: float
 ) -> None:
+    """Record where the job was published, so the dispatcher can tell if that entry is lost."""
     try:
         async with pool.acquire(timeout=acquire_timeout_s) as conn:
-            await conn.execute("UPDATE jobs SET dispatched_at = now() WHERE id = $1", job_id)
+            await conn.execute(
+                "UPDATE jobs SET dispatched_at = now(), stream_entry_id = $2 WHERE id = $1",
+                job_id,
+                entry_id,
+            )
     except asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError:
         # Harmless: an unmarked job is simply republished later, and the claim is conditional.
         log.warning("mark_dispatched_failed", extra={"job_id": str(job_id)})

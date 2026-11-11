@@ -22,9 +22,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     lease_until     timestamptz,
     next_attempt_at timestamptz,
     dispatched_at   timestamptz,
+    -- Redis entry of the latest dispatch; the dispatcher republishes only if it is gone.
+    stream_entry_id text,
+    dead_reason     text,
     created_at      timestamptz NOT NULL DEFAULT now(),
     updated_at      timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS jobs_expired_lease_idx
+    ON jobs (lease_until) WHERE state = 'running';
 
 -- Dispatcher scans (DESIGN.md s5.3): due retries and queued-but-undispatched jobs.
 CREATE INDEX IF NOT EXISTS jobs_retry_due_idx
