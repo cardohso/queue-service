@@ -105,7 +105,6 @@ class Worker:
         await self._ensure_group()
         loops = [
             asyncio.create_task(self._fetch_loop(), name="fetch"),
-            asyncio.create_task(self._reclaim_loop(), name="reclaim"),
             asyncio.create_task(self._dispatch_loop(), name="dispatch"),
         ]
         # Loops exit on their own once _stopping is set (fetch within block_ms). Not cancelling
@@ -138,6 +137,8 @@ class Worker:
 
     async def _fetch_loop(self) -> None:
         redis_delay = 0.1
+        loop = asyncio.get_running_loop()
+        next_reclaim = loop.time() + self._s.reclaim_interval_s
         while not self._stopping.is_set():
             if await self._paused_for_db():
                 continue
@@ -148,6 +149,13 @@ class Worker:
                 if self._s.max_in_flight - len(self._in_flight) <= 0:
                     await self._slot_freed.wait()
                 continue
+            # Recovered work first. It is already a full lease late; if it had to compete
+            # with the backlog for slots, crash recovery would take as long as draining the
+            # backlog (measured: 6.8 s to detect with a 2 s lease) instead of about one lease.
+            if loop.time() >= next_reclaim:
+                next_reclaim = loop.time() + self._s.reclaim_interval_s
+                if await self._reclaim(free):
+                    continue  # slots changed: recompute before reading new work
             if self._isolation.isolating:
                 # A suspect job is waiting to run alone: pulling new work onto this worker
                 # would put more jobs next to it if it crashes the process again.
@@ -166,22 +174,19 @@ class Worker:
             for m in messages:  # spawn even when stopping: they're in our PEL already
                 self._spawn(m)
 
-    async def _reclaim_loop(self) -> None:
-        while not self._stopping.is_set():
-            await self._sleep_or_stop(self._s.reclaim_interval_s)
-            free = self._s.max_in_flight - len(self._in_flight)
-            if self._stopping.is_set() or free <= 0 or self._db_is_paused():
-                continue
-            try:
-                messages = await self._broker.autoclaim(
-                    self.worker_id, int(self._s.lease_s * 1000), free
-                )
-            except REDIS_INFRA_ERRORS as exc:
-                log.warning("autoclaim_failed", extra={"error": repr(exc)})
-                continue
-            self._count("reclaimed", len(messages))
-            for m in messages:
-                self._spawn(m)
+    async def _reclaim(self, free: int) -> int:
+        """Take over messages idle longer than a lease (their worker is presumed dead)."""
+        try:
+            messages = await self._broker.autoclaim(
+                self.worker_id, int(self._s.lease_s * 1000), free
+            )
+        except REDIS_INFRA_ERRORS as exc:
+            log.warning("autoclaim_failed", extra={"error": repr(exc)})
+            return 0
+        self._count("reclaimed", len(messages))
+        for m in messages:
+            self._spawn(m)
+        return len(messages)
 
     async def _dispatch_loop(self) -> None:
         while not self._stopping.is_set():
@@ -423,9 +428,6 @@ class Worker:
 
     def _db_ok(self) -> None:
         self._db_backoff_s = 0.0
-
-    def _db_is_paused(self) -> bool:
-        return asyncio.get_running_loop().time() < self._db_paused_until
 
     async def _paused_for_db(self) -> bool:
         remaining = self._db_paused_until - asyncio.get_running_loop().time()

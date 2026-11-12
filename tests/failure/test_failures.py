@@ -13,7 +13,7 @@ import statistics
 import time
 from collections import Counter
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -53,6 +53,7 @@ async def test_kill9_worker_mid_job(make_infra: Callable[..., Infra], make_clust
     await wait_until(lambda: _ge(c.running_on("A"), 4), 30, "worker A is running >= 4 jobs")
     held = await c.running_on("A")
     t_kill = await c.db_now()
+    t_kill_host = datetime.now(UTC)
     a.kill9()
 
     await c.wait_final(ids, 60)
@@ -67,6 +68,7 @@ async def test_kill9_worker_mid_job(make_infra: Callable[..., Infra], make_clust
     )
     rep.recovery_s = (rows[0]["t"] - t_kill).total_seconds() if rows[0]["t"] else None
     rep.notes |= {"jobs_held_by_killed_worker": held, "lease_s": LEASE_S}
+    rep.notes["recovery_phases_s"] = await _recovery_phases(c, t_kill_host)
     rep.save()
 
     assert rep.done == rep.jobs
@@ -80,6 +82,48 @@ async def test_kill9_worker_mid_job(make_infra: Callable[..., Infra], make_clust
     assert dangling[0]["n"] == 0
     assert rep.recovery_s is not None
     assert rep.recovery_s < LEASE_S + 10, "takeover should take about one lease, not minutes"
+
+
+async def _recovery_phases(c: Cluster, t_kill_host: datetime) -> dict[str, Any]:
+    """Where recovery time goes, per interrupted job (all relative to the kill):
+
+    detect   kill -> the survivor reclaims the message (XAUTOCLAIM; >= lease by design)
+    wait     reclaimed -> claimed (waiting to run in isolation, or for a free slot)
+    run      claimed -> done
+    Host clock for log events, Postgres clock for attempt timestamps (each used consistently).
+    """
+    rows = await c.q(
+        """SELECT nxt.job_id, nxt.started_at, nxt.finished_at FROM job_attempts cut
+           JOIN job_attempts nxt ON nxt.job_id = cut.job_id AND nxt.epoch = cut.epoch
+                                AND nxt.attempt = cut.attempt + 1
+           WHERE cut.outcome = 'lost_lease' AND cut.worker_id = 'A'"""
+    )
+    reclaimed: dict[str, datetime] = {}
+    for p in c.procs:
+        for rec in p.records():
+            if rec.get("event") == "isolating_suspect_job" and "job_id" in rec:
+                t = datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00"))
+                reclaimed.setdefault(rec["job_id"], t)
+    detect, wait, run = [], [], []
+    for r in rows:
+        run.append((r["finished_at"] - r["started_at"]).total_seconds())
+        t_rec = reclaimed.get(str(r["job_id"]))
+        if t_rec is not None:
+            detect.append((t_rec - t_kill_host).total_seconds())
+    # wait: from the first reclaim to each claim, on the Postgres clock via the first claim
+    starts = sorted(r["started_at"] for r in rows)
+    if starts:
+        wait = [(t - starts[0]).total_seconds() for t in starts]
+
+    def stats(xs: list[float]) -> dict[str, float] | None:
+        return {"min": round(min(xs), 2), "max": round(max(xs), 2)} if xs else None
+
+    return {
+        "jobs": len(rows),
+        "detect": stats(detect),
+        "claim_spread_after_first": stats(wait),
+        "run": stats(run),
+    }
 
 
 async def _ge(v: Any, n: int) -> bool:
@@ -349,6 +393,7 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
 
     codes: Counter[int] = Counter()
     latencies: list[float] = []
+    by_code: dict[int, list[float]] = {}
     missing_retry_after = 0
     accepted: list[UUID] = []
     depths: list[int] = []
@@ -373,6 +418,7 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
             t0 = time.monotonic()
             r = await client.post("/jobs", json=io(50), headers={"Idempotency-Key": f"f{n}-{i}"})
             latencies.append(time.monotonic() - t0)
+            by_code.setdefault(r.status_code, []).append(latencies[-1])
             codes[r.status_code] += 1
             if r.status_code == 202:
                 accepted.append(UUID(r.json()["job_id"]))
@@ -392,6 +438,7 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
         await asyncio.gather(*clients)
     await sampler
 
+    api_metrics = await c.metrics(next(p for p in c.procs if p.name == "api"))
     await c.wait_final(accepted, 120)
     rep = await c.check_invariant("api_flood", accepted)
     lat = sorted(latencies)
@@ -411,6 +458,20 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
         "max_depth_limit": max_depth,
         "max_observed_depth": max(depths) if depths else None,
         "concurrent_clients": 40,
+        # Diagnosis for the p99: is it the DB path (202) or the whole process (429 too)?
+        "p99_ms_by_code": {
+            code: round(sorted(v)[min(len(v) - 1, int(0.99 * len(v)))] * 1000, 1)
+            for code, v in by_code.items()
+        },
+        "api_loop_lag_over_100ms": api_metrics.get("qs_event_loop_lag_seconds_count", 0)
+        - api_metrics.get('qs_event_loop_lag_seconds_bucket{le="0.1"}', 0),
+        "api_loop_lag_samples": api_metrics.get("qs_event_loop_lag_seconds_count", 0),
+        "api_loop_lag_mean_ms": round(
+            1000
+            * api_metrics.get("qs_event_loop_lag_seconds_sum", 0)
+            / max(1.0, api_metrics.get("qs_event_loop_lag_seconds_count", 1)),
+            1,
+        ),
     }
     rep.save()
 

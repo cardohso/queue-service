@@ -154,3 +154,53 @@ async def test_a_job_whose_last_attempt_crashed_runs_alone() -> None:
     assert store.jobs[suspect_id].attempts == 2  # the crash still counted, once
     assert ex.max_concurrent_with_suspect == 1  # it really ran alone
     assert reg.get_sample_value("qs_isolated_runs_total") == 1
+
+
+# ---- reclaim priority ------------------------------------------------------------------------
+
+
+class Recorder:
+    def __init__(self, expected: int) -> None:
+        self.order: list[object] = []
+        self.all_ran = asyncio.Event()
+        self._expected = expected
+
+    async def run(self, claim: Claim, timeout_s: float) -> dict[str, object]:
+        self.order.append(claim.job_id)
+        if len(self.order) == self._expected:
+            self.all_ran.set()
+        return {}
+
+
+async def test_a_crashed_workers_job_runs_before_the_existing_backlog() -> None:
+    """Recovered work jumps the queue: otherwise recovery time grows with the backlog."""
+    clock = FakeClock()
+    store, broker, rec = FakeStore(clock), FakeBroker(clock), Recorder(expected=6)
+    await broker.ensure_group()
+
+    # A job a dead worker was holding: read into its PEL, claimed, lease long expired.
+    dead_id = store.accept("io_sleep", {"duration_ms": 1}, 3)
+    await broker.publish(dead_id, 1)
+    await broker.read("ghost", 1, 0)
+    assert isinstance(await store.claim(dead_id, 1, "ghost", 10.0), Claim)
+    clock.advance(11)
+
+    # Plenty of fresh work already queued behind it.
+    backlog = [store.accept("io_sleep", {"duration_ms": 1}, 3) for _ in range(5)]
+    for job_id in backlog:
+        await broker.publish(job_id, 1)
+
+    w = Worker(
+        Settings(
+            max_in_flight=1, lease_s=10.0, reclaim_interval_s=0.0, block_ms=5,
+            dispatch_interval_s=3600.0, commit_retry_s=0.0,
+        ),
+        store, broker, rec, worker_id="w1",
+    )  # fmt: skip
+    task = asyncio.create_task(w.run())
+    async with asyncio.timeout(5):
+        await rec.all_ran.wait()
+    w.stop()
+    await task  # drains: every job that ran is committed before run() returns
+    assert all(store.jobs[j].state == "done" for j in [dead_id, *backlog])
+    assert rec.order[0] == dead_id, f"recovered job ran at position {rec.order.index(dead_id)}"

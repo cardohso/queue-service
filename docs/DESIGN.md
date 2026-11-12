@@ -294,6 +294,19 @@ It is only paid after a crash; normal throughput is unchanged.
 > Interview version: "A crash can't tell you who caused it, so I don't guess: survivors are
 > re-run in isolation, and the next crash has exactly one possible culprit."
 
+### 9.2 Reclaimed work jumps the queue (added in step 7)
+
+**Found by a failure test.** After `kill -9`, the survivor took 6.3-6.8 s just to *notice*
+the dead worker's jobs, with a 2 s lease. The reclaim loop only ran when a slot was free,
+and the fetch loop refilled every freed slot with new backlog first, so recovery time grew
+with the backlog instead of the lease. Now the fetch loop runs `XAUTOCLAIM` before reading
+new work whenever a reclaim is due. Detection dropped to 2.3-3.5 s (lease + reclaim interval
++ waiting for a slot) and total recovery from 9.0-9.4 s to 5.1-6.0 s over 4 runs; the rest
+is the isolation cost of section 9.1 (8 suspects x 0.3 s, run one at a time).
+
+> Interview version: "Recovered work must jump the queue, or crash recovery time scales with
+> the backlog instead of the lease."
+
 ## 10. Graceful shutdown (SIGTERM)
 
 1. Stop fetching (readiness → 503 so the k8s Service stops routing; API only).

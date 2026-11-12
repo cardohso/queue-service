@@ -6,6 +6,7 @@ both, so a fake that drifts from the real thing fails CI. Without that, the prop
 tests could pass for the wrong reason: they would be proving properties of the fakes.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -317,6 +318,11 @@ class FakeBroker:
             return []
         g = self.group
         seqs = sorted(s for s in self.stream if s > g.last_delivered)[:count]
+        if not seqs and block_ms > 0:
+            # Like XREADGROUP BLOCK: an empty read waits instead of returning at once, so a
+            # fetch loop driven by this fake yields to the event loop rather than spinning.
+            await asyncio.sleep(block_ms / 1000)
+            seqs = sorted(s for s in self.stream if s > g.last_delivered)[:count]
         for s in seqs:
             g.pel[s] = _Pending(consumer, self.clock.now())
             g.last_delivered = s
