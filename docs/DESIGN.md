@@ -240,6 +240,24 @@ Result on the same test: 28.5 s, 0 503s, 0 duplicate executions.
 > Interview version: "Shed load by queue length, not by timeout. A timeout that cancels work
 > turns latency into errors, and here it even destroyed the connection pool."
 
+**429 before the body is read (revised in step 7).** The queue-depth check runs in a pure ASGI
+middleware ahead of FastAPI, so a rejected request is never read, parsed or validated (an
+invalid body over the limit gets 429, not 422). Cost per 429, in-process, 3 runs each:
+188-196 us vs 275-317 us when the check sat inside the handler (about 35 % less).
+
+**Measuring overload honestly.** The first flood test used 40 clients that each waited for
+their reply before sending again (closed loop). Its p99 drifted from 0.7 s to 1.8 s while the
+API's event loop stayed idle: it measured concurrency divided by the laptop's throughput. The
+test now offers a fixed arrival rate (open loop, 300 req/s locally, 150 in CI), times each
+request from its *scheduled* send time (no coordinated omission), and runs the generator as
+4 separate processes. A single generator process fell behind its own schedule (270-400 ms
+late, best guess: client connection-pool overhead with hundreds of connections; not proven)
+and collapsed 3 runs out of 7. It also refuses to report a result if the generator ran late.
+Valid runs: p99 30-645 ms at 300 req/s, zero errors, depth peak 122-158 for a limit of 100.
+
+> Interview version: "Closed-loop load tests hide overload, because the clients slow down
+> with the server. An open-loop test sends at the rate real traffic arrives."
+
 ## 8. Worker pool
 
 - I/O jobs: asyncio tasks under the semaphore, `asyncio.timeout()`. Handlers must be

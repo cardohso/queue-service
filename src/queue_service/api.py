@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,6 +14,7 @@ import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from queue_service.admission import Admission, ConcurrencyLimit, DepthSampler, Overloaded
 from queue_service.config import Settings
@@ -129,8 +131,46 @@ async def _accept_and_dispatch(deps: Deps, job: AnyJob, idempotency_key: str | N
     return JobAccepted(job_id=accepted.job_id, state="queued")
 
 
+class AdmissionMiddleware:
+    """Answer 429 for POST /jobs *before* the request body is read or validated.
+
+    Rejecting is the API's job exactly when it is overloaded, so it must be the cheapest thing
+    it does. As a check inside the handler, every 429 first paid for reading the body, JSON
+    parsing, pydantic validation and FastAPI dependency resolution, which under a flood is most
+    of the CPU the process has. Pure ASGI (not BaseHTTPMiddleware) to keep the reject path short.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["method"] == "POST" and scope["path"] == "/jobs":
+            deps: Deps | None = getattr(scope["app"].state, "deps", None)
+            retry_after = deps.admission.retry_after() if deps is not None else None
+            if deps is not None and retry_after is not None:
+                deps.metrics.rejected.labels("429").inc()
+                body = json.dumps(
+                    {"detail": f"queue depth {deps.admission.depth} over limit"}
+                ).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 429,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                            (b"retry-after", str(retry_after).encode()),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="queue-service", lifespan=_lifespan)
+    app.add_middleware(AdmissionMiddleware)
     app.state.settings = settings or Settings.from_env()
 
     @app.post("/jobs", status_code=202, response_model=JobAccepted)
@@ -142,14 +182,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         deps: Deps = request.app.state.deps
         if job.type == "poison" and not deps.settings.fault_injection:
             raise HTTPException(422, detail="fault injection is disabled")
-        retry_after = deps.admission.retry_after()
-        if retry_after is not None:
-            deps.metrics.rejected.labels("429").inc()
-            raise HTTPException(
-                429,
-                detail=f"queue depth {deps.admission.depth} over limit",
-                headers={"Retry-After": str(retry_after)},
-            )
+        # Queue-depth back-pressure (429) is applied by AdmissionMiddleware, before this
+        # handler runs and before the body is read: see that class for why.
         try:
             with deps.db_limit.slot():
                 return await _accept_and_dispatch(deps, job, idempotency_key)

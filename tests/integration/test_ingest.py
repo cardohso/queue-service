@@ -185,3 +185,22 @@ async def test_db_overload_is_shed_immediately_by_queue_length_not_timeout(
         assert shed_in < 0.5  # immediately, not after the 5 s acquire timeout
         del held
     assert (await first).status_code == 202  # the waiting request was served, not cancelled
+
+
+async def test_429_is_decided_before_the_body_is_read_or_validated(
+    make_client: MakeClient, redis_url: str
+) -> None:
+    client, app = await make_client(max_depth=0)
+    redis = Redis.from_url(redis_url)
+    await redis.xadd("jobs", {"job_id": "x", "epoch": "1"})  # depth 1 > limit 0
+    await redis.aclose()
+    await app.state.deps.sampler.sample_once()
+    # Not even JSON. Inside the handler this would have been a 422 after full parsing; the
+    # middleware rejects it first, which is what makes shedding cheap under a flood.
+    resp = await client.post(
+        "/jobs", content=b"not json", headers={"content-type": "application/json"}
+    )
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == "1"
+    assert resp.json()["detail"].startswith("queue depth")
+    assert (await client.get("/healthz")).status_code == 200  # other routes untouched

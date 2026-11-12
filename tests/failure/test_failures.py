@@ -9,7 +9,10 @@ Run: ``uv run pytest -m failure -s`` (``-s`` prints the result lines).
 """
 
 import asyncio
+import json
+import os
 import statistics
+import sys
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -17,7 +20,6 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-import httpx
 from redis.asyncio import Redis
 
 from tests.failure.harness import Cluster, Infra, Report, fail, io, poison, wait_until
@@ -382,9 +384,21 @@ async def test_poison_that_kills_every_worker_is_dead_lettered_after_the_budget(
 # ---- 5. flood the API ------------------------------------------------------------------------
 
 
+FLOOD_RATE_PER_S = int(os.environ.get("QS_FLOOD_RATE", "300"))  # ~4x the slow worker's drain rate
+FLOOD_GENERATORS = 4  # separate processes: one Python client process cannot keep up
+FLOOD_SECONDS = 8
+
+
 async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
     make_infra: Callable[..., Infra], make_cluster: Any
 ) -> None:
+    """Open-loop flood: requests arrive at a fixed rate whether or not earlier ones finished.
+
+    A closed-loop test (N clients, each waiting for its reply) slows its own arrival rate down
+    as the server slows, so it measures concurrency / machine throughput rather than overload.
+    Real traffic does not wait. Latency is measured from each request's *scheduled* send time,
+    so a client that falls behind cannot hide server slowness (no coordinated omission).
+    """
     max_depth = 100
     infra = make_infra()
     c: Cluster = make_cluster(infra)
@@ -393,6 +407,7 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
 
     codes: Counter[int] = Counter()
     latencies: list[float] = []
+    send_lateness: list[float] = []  # client health: did we send on schedule?
     by_code: dict[int, list[float]] = {}
     missing_retry_after = 0
     accepted: list[UUID] = []
@@ -411,73 +426,86 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
         finally:
             await r.aclose()
 
-    async def hammer(client: httpx.AsyncClient, n: int) -> None:
-        i = 0
-        while not stop.is_set():
-            i += 1
-            t0 = time.monotonic()
-            r = await client.post("/jobs", json=io(50), headers={"Idempotency-Key": f"f{n}-{i}"})
-            latencies.append(time.monotonic() - t0)
-            by_code.setdefault(r.status_code, []).append(latencies[-1])
-            codes[r.status_code] += 1
-            if r.status_code == 202:
-                accepted.append(UUID(r.json()["job_id"]))
-            elif r.status_code == 429 and "Retry-After" not in r.headers:
-                nonlocal missing_retry_after
-                missing_retry_after += 1
-
     sampler = asyncio.create_task(sample_depth())
-    async with httpx.AsyncClient(
-        base_url=f"http://127.0.0.1:{c.api_port}",
-        timeout=10,
-        limits=httpx.Limits(max_connections=64),
-    ) as client:
-        clients = [asyncio.create_task(hammer(client, n)) for n in range(40)]
-        await asyncio.sleep(8)  # flood duration: the input of the test, not a wait
-        stop.set()
-        await asyncio.gather(*clients)
+    gens = []
+    for g in range(FLOOD_GENERATORS):
+        out = c.log_dir / f"loadgen-{g}.json"
+        gens.append(
+            (
+                out,
+                await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "tests.failure.loadgen",
+                    f"http://127.0.0.1:{c.api_port}",
+                    str(FLOOD_RATE_PER_S / FLOOD_GENERATORS),
+                    str(FLOOD_SECONDS),
+                    f"flood{g}",
+                    str(out),
+                ),
+            )
+        )
+    for _, proc in gens:
+        assert await asyncio.wait_for(proc.wait(), FLOOD_SECONDS + 120) == 0
+    offered_s = 0.0
+    for out, _ in gens:
+        data = json.loads(out.read_text())
+        offered_s = max(offered_s, data["elapsed_s"])
+        send_lateness.extend(data["send_lateness"])
+        for status, latency, job_id, has_retry_after in data["results"]:
+            code = status if isinstance(status, int) else 0  # 0 = transport error
+            latencies.append(latency)
+            by_code.setdefault(code, []).append(latency)
+            codes[code] += 1
+            if code == 202:
+                accepted.append(UUID(job_id))
+            elif code == 429 and not has_retry_after:
+                missing_retry_after += 1
+    stop.set()
     await sampler
 
     api_metrics = await c.metrics(next(p for p in c.procs if p.name == "api"))
     await c.wait_final(accepted, 120)
     rep = await c.check_invariant("api_flood", accepted)
-    lat = sorted(latencies)
 
-    def p(q: float) -> float:
-        return lat[min(len(lat) - 1, int(q * len(lat)))]
+    def pct(xs: list[float], q: float) -> float:
+        xs = sorted(xs)
+        return xs[min(len(xs) - 1, int(q * len(xs)))]
 
     rep.notes |= {
+        "load": f"open loop, {FLOOD_RATE_PER_S} req/s for {FLOOD_SECONDS} s, {FLOOD_GENERATORS} procs",
         "requests": sum(codes.values()),
         "codes": dict(codes),
         "latency_ms": {
-            "p50": round(p(0.50) * 1000, 1),
-            "p95": round(p(0.95) * 1000, 1),
-            "p99": round(p(0.99) * 1000, 1),
-            "mean": round(statistics.fmean(lat) * 1000, 1),
-        },
+            q: round(pct(latencies, v) * 1000, 1)
+            for q, v in (("p50", 0.50), ("p95", 0.95), ("p99", 0.99), ("max", 1.0))
+        }
+        | {"mean": round(statistics.fmean(latencies) * 1000, 1)},
+        "p99_ms_by_code": {k: round(pct(v, 0.99) * 1000, 1) for k, v in by_code.items()},
+        "client_send_lateness_p99_ms": round(pct(send_lateness, 0.99) * 1000, 1),
+        "offered_rate_per_s": round(sum(codes.values()) / offered_s, 1),
         "max_depth_limit": max_depth,
         "max_observed_depth": max(depths) if depths else None,
-        "concurrent_clients": 40,
-        # Diagnosis for the p99: is it the DB path (202) or the whole process (429 too)?
-        "p99_ms_by_code": {
-            code: round(sorted(v)[min(len(v) - 1, int(0.99 * len(v)))] * 1000, 1)
-            for code, v in by_code.items()
-        },
-        "api_loop_lag_over_100ms": api_metrics.get("qs_event_loop_lag_seconds_count", 0)
-        - api_metrics.get('qs_event_loop_lag_seconds_bucket{le="0.1"}', 0),
-        "api_loop_lag_samples": api_metrics.get("qs_event_loop_lag_seconds_count", 0),
         "api_loop_lag_mean_ms": round(
             1000
             * api_metrics.get("qs_event_loop_lag_seconds_sum", 0)
             / max(1.0, api_metrics.get("qs_event_loop_lag_seconds_count", 1)),
-            1,
+            2,
         ),
     }
     rep.save()
 
+    # The measurement is only valid if the client really sent at the intended rate.
+    # Measured on an M1 Pro (8 cores) shared with Docker: healthy runs 2-30 ms; one busy run
+    # 149 ms with valid results. Beyond 200 ms the generator, not the API, is the bottleneck.
+    assert pct(send_lateness, 0.99) < 0.2, "load generator fell behind: result not valid"
     assert codes[429] > 0, "the flood never triggered back-pressure"
     assert set(codes) <= {202, 429}, f"errors under load: {dict(codes)}"
     assert missing_retry_after == 0
-    assert p(0.99) < 1.0, "back-pressure should keep the API responsive"
+    assert pct(latencies, 0.99) < FLOOD_P99_BOUND_S, "back-pressure should keep the API responsive"
     # Soft limit: depth can overshoot by what is accepted between two samples.
     assert max(depths) <= max_depth * 2, f"depth ran away: {max(depths)}"
+
+
+# Valid runs after the open-loop rewrite: p99 30-645 ms at 300 req/s (9 runs, loaded laptop).
+FLOOD_P99_BOUND_S = 1.0

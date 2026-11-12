@@ -42,3 +42,23 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  failure:
+    # Real faults: kill -9, Redis restart, Postgres stop/pause/latency, poison, open-loop flood.
+    runs-on: ubuntu-latest
+    needs: integration
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --locked
+      - run: docker pull -q ghcr.io/shopify/toxiproxy:2.9.0
+      - run: uv run pytest -m failure -s -p no:logging
+        env:
+          QS_RESULTS_DIR: results
+          QS_FLOOD_RATE: "150"  # 4 vCPU runner: still ~2x what the slow worker drains
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: failure-results
+          path: results/failures/
