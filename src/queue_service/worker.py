@@ -371,7 +371,10 @@ class Worker:
             await asyncio.sleep(self._s.lease_s / 3)
             try:
                 still_ours = await self._store.heartbeat(claim, self._s.lease_s)
-            except DB_INFRA_ERRORS:
+            except DB_INFRA_ERRORS as exc:
+                # Not fatal on its own, but enough of these in a row let the lease expire.
+                self._count("heartbeat_failed")
+                log.warning("heartbeat_failed", extra={"error": repr(exc)})
                 continue
             if not still_ours:
                 # Someone took over. Our commit will be fenced out; let the job finish.

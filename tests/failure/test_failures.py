@@ -203,6 +203,7 @@ async def test_postgres_slow_100ms_each_way(
     rep.notes |= {"latency_ms_each_way": 100, "wall_s": round(elapsed, 2)}
     rep.save()
     assert rep.done == rep.jobs
+    assert c.client_stats["503"] == 0, "slow is not overloaded: latency alone must not cause 503s"
     assert rep.extra_executions == 0, "slow is not dead: latency alone must not cause duplicates"
 
 

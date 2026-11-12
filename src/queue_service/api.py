@@ -14,7 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.asyncio import Redis
 
-from queue_service.admission import Admission, DepthSampler
+from queue_service.admission import Admission, ConcurrencyLimit, DepthSampler, Overloaded
 from queue_service.config import Settings
 from queue_service.db import create_pool, migrate
 from queue_service.ingest import (
@@ -24,7 +24,7 @@ from queue_service.ingest import (
     mark_dispatched,
 )
 from queue_service.metrics import ApiMetrics, LoopLag
-from queue_service.schemas import JobAccepted, JobRequest, JobStatus
+from queue_service.schemas import AnyJob, JobAccepted, JobRequest, JobStatus
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class Deps:
     sampler: DepthSampler
     metrics: ApiMetrics
     loop_lag: LoopLag
+    db_limit: ConcurrencyLimit
 
 
 @asynccontextmanager
@@ -76,6 +77,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         sampler,
         metrics,
         loop_lag,
+        ConcurrencyLimit(settings.db_pool_max_size + settings.db_max_waiting),
     )
     await sampler.sample_once()
     tasks = [asyncio.create_task(sampler.run()), asyncio.create_task(loop_lag.run())]
@@ -89,6 +91,42 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await task
         await redis.aclose()
         await pool.close()
+
+
+async def _accept_and_dispatch(deps: Deps, job: AnyJob, idempotency_key: str | None) -> JobAccepted:
+    try:
+        accepted = await accept_job(
+            deps.pool,
+            job,
+            idempotency_key,
+            max_attempts=deps.settings.max_attempts,
+            acquire_timeout_s=deps.settings.db_acquire_timeout_s,
+        )
+    except IdempotencyConflict:
+        deps.metrics.rejected.labels("409").inc()
+        raise HTTPException(409, detail="Idempotency-Key reused with a different body") from None
+    except _DB_ERRORS:
+        log.exception("accept_failed")
+        deps.metrics.rejected.labels("503").inc()
+        raise HTTPException(
+            503, detail="database unavailable", headers={"Retry-After": "1"}
+        ) from None
+
+    # The job is durable. Dispatch is best-effort: if Redis is down or we crash here,
+    # the dispatcher republishes it from Postgres (DESIGN.md s5.3).
+    if not accepted.created:
+        deps.metrics.replays.inc()
+        return JobAccepted(job_id=accepted.job_id, state="queued")
+    deps.metrics.accepted.inc()
+    entry_id = await deps.publisher.publish(accepted.job_id, accepted.epoch)
+    if entry_id is not None:
+        await mark_dispatched(
+            deps.pool,
+            accepted.job_id,
+            entry_id,
+            acquire_timeout_s=deps.settings.db_acquire_timeout_s,
+        )
+    return JobAccepted(job_id=accepted.job_id, state="queued")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -113,40 +151,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 headers={"Retry-After": str(retry_after)},
             )
         try:
-            accepted = await accept_job(
-                deps.pool,
-                job,
-                idempotency_key,
-                max_attempts=deps.settings.max_attempts,
-                acquire_timeout_s=deps.settings.db_acquire_timeout_s,
-            )
-        except IdempotencyConflict:
-            deps.metrics.rejected.labels("409").inc()
-            raise HTTPException(
-                409, detail="Idempotency-Key reused with a different body"
-            ) from None
-        except _DB_ERRORS:
-            log.exception("accept_failed")
+            with deps.db_limit.slot():
+                return await _accept_and_dispatch(deps, job, idempotency_key)
+        except Overloaded:
             deps.metrics.rejected.labels("503").inc()
             raise HTTPException(
-                503, detail="database unavailable", headers={"Retry-After": "1"}
+                503, detail="database overloaded", headers={"Retry-After": "1"}
             ) from None
-
-        # The job is durable. Dispatch is best-effort: if Redis is down or we crash here,
-        # the dispatcher republishes it from Postgres (DESIGN.md s5.3).
-        if not accepted.created:
-            deps.metrics.replays.inc()
-        if accepted.created:
-            deps.metrics.accepted.inc()
-            entry_id = await deps.publisher.publish(accepted.job_id, accepted.epoch)
-            if entry_id is not None:
-                await mark_dispatched(
-                    deps.pool,
-                    accepted.job_id,
-                    entry_id,
-                    acquire_timeout_s=deps.settings.db_acquire_timeout_s,
-                )
-        return JobAccepted(job_id=accepted.job_id, state="queued")
 
     @app.get("/jobs/{job_id}", response_model=JobStatus)
     async def get_job(request: Request, job_id: UUID) -> JobStatus:

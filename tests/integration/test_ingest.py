@@ -161,3 +161,27 @@ async def test_ingest_never_blocks_on_unreachable_redis_for_long(
     async with asyncio.timeout(3):  # connect timeout bounds the dispatch attempt
         resp: httpx.Response = await client.post("/jobs", json=IO_JOB)
     assert resp.status_code == 202
+
+
+async def test_db_overload_is_shed_immediately_by_queue_length_not_timeout(
+    make_client: MakeClient,
+) -> None:
+    # Pool of 1, no waiting room: one request may use or wait for the DB; the next is shed.
+    client, app = await make_client(db_pool_max_size=1, db_max_waiting=0, db_acquire_timeout_s=5)
+    async with app.state.deps.pool.acquire() as held:  # the database is "busy"
+        first = asyncio.create_task(client.post("/jobs", json=IO_JOB))  # waits for the pool
+
+        async def first_is_waiting() -> bool:
+            return bool(app.state.deps.db_limit.in_use == 1)
+
+        for _ in range(200):
+            if await first_is_waiting():
+                break
+            await asyncio.sleep(0.01)
+        t0 = asyncio.get_running_loop().time()
+        second = await client.post("/jobs", json=IO_JOB)
+        shed_in = asyncio.get_running_loop().time() - t0
+        assert second.status_code == 503
+        assert shed_in < 0.5  # immediately, not after the 5 s acquire timeout
+        del held
+    assert (await first).status_code == 202  # the waiting request was served, not cancelled

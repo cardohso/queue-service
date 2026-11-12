@@ -17,9 +17,14 @@ class Settings:
     # Used to turn "how far over the limit" into a Retry-After hint (refined in step 6
     # once workers export a measured drain rate).
     assumed_drain_per_s: float = 100.0
-    # Fail fast with 503 instead of queueing behind a saturated DB pool.
-    db_acquire_timeout_s: float = 0.2
     db_pool_max_size: int = 10
+    # Load shedding: beyond pool size + this many waiting requests, answer 503 at once.
+    # Size it so the last one in line still gets a connection before db_acquire_timeout_s:
+    # pool_size * timeout / db_time_per_request = 10 * 5 / 0.25 s (slow network) = 200.
+    db_max_waiting: int = 100
+    # Safety net only, NOT the shedding mechanism: it must comfortably exceed the time to open
+    # a connection on a slow network (0.84 s at 100 ms RTT/2), or it destroys the pool.
+    db_acquire_timeout_s: float = 5.0
     # Short timeouts so a dead Redis can never stall request handling.
     redis_timeout_s: float = 0.5
     max_attempts: int = 5

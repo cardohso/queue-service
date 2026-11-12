@@ -7,7 +7,8 @@ is therefore soft: depth can overshoot by whatever is accepted between two sampl
 import asyncio
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import asyncpg
@@ -44,6 +45,34 @@ class Admission:
             return None
         excess = self.depth - self._max_depth
         return max(1, min(MAX_RETRY_AFTER_S, math.ceil(excess / self._drain_per_s)))
+
+
+class Overloaded(Exception):
+    """Too many requests are already waiting for the database."""
+
+
+class ConcurrencyLimit:
+    """Shed load by queue length, not by timeout (DESIGN.md s7, revised in step 7).
+
+    At most ``limit`` requests may use or wait for the database at once; the next one is
+    rejected immediately, before it touches the pool. A short acquire *timeout* looked
+    equivalent but is not: under network latency it turned slowness into 503s and, by
+    cancelling connection set-up, shrank the pool to nothing (0.4 req/s instead of 22.8).
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self.in_use = 0
+
+    @contextmanager
+    def slot(self) -> Iterator[None]:
+        if self.in_use >= self._limit:
+            raise Overloaded
+        self.in_use += 1
+        try:
+            yield
+        finally:
+            self.in_use -= 1
 
 
 class DepthSampler:

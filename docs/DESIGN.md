@@ -216,6 +216,30 @@ dispatcher catches up later) up to a backlog limit counted in Postgres.
 **Decided (2026-11-11): keep accepting while Redis is down.** Acceptance depends only on
 the durable store; a Redis outage delays work but doesn't reject producers.
 
+**Load shedding by queue length, not timeout (revised in step 7).** The first version
+answered 503 when a DB connection could not be acquired within 0.2 s. A failure test with
+100 ms of injected latency each way showed it collapse: 11,864 503s for 150 accepted jobs,
+587 s wall time. An experiment isolated why (16 clients, 10 s each):
+
+| Pool config | Requests/s | Acquire timeouts | Server connections after |
+|---|---|---|---|
+| 0.2 s acquire timeout (old) | 0.4 | 626 | 0 |
+| 2.0 s acquire timeout | 22.8 | 0 | 10 |
+| pre-warmed to 10, 0.2 s timeout | 1.9 | 589 | 2 |
+
+A new connection takes 0.84 s on that network, so it can never be opened within 0.2 s, and
+cancelled acquires also tore down connections mid-setup, so even a pre-warmed pool shrank.
+Now the API counts requests using or waiting for the DB and answers 503 **at once** beyond
+`db_pool_max_size + db_max_waiting` (10 + 100), without touching the pool; the acquire timeout
+(5 s) is only a safety net. Sizing rule: the last request in line must still get a connection
+before the timeout: `pool * timeout / db_time_per_request` (10 * 5 / 0.25 s = 200).
+The worker pool also has room for one heartbeat per in-flight job (`2 * max_in_flight + 4`);
+failed heartbeats are now counted (`qs_heartbeat_failures_total`) instead of silent.
+Result on the same test: 28.5 s, 0 503s, 0 duplicate executions.
+
+> Interview version: "Shed load by queue length, not by timeout. A timeout that cancels work
+> turns latency into errors, and here it even destroyed the connection pool."
+
 ## 8. Worker pool
 
 - I/O jobs: asyncio tasks under the semaphore, `asyncio.timeout()`. Handlers must be

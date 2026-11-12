@@ -22,3 +22,16 @@ def test_retry_after_scales_with_excess_and_is_clamped(depth: int, expected: int
     a = Admission(max_depth=100, drain_per_s=10)
     a.update(depth, "redis")
     assert a.retry_after() == expected
+
+
+def test_concurrency_limit_sheds_beyond_the_limit_and_frees_slots() -> None:
+    from queue_service.admission import ConcurrencyLimit, Overloaded
+
+    lim = ConcurrencyLimit(2)
+    with lim.slot(), lim.slot():
+        assert lim.in_use == 2
+        with pytest.raises(Overloaded), lim.slot():
+            pass
+    assert lim.in_use == 0  # released even though the third was rejected
+    with lim.slot():  # and usable again
+        pass

@@ -103,6 +103,11 @@ class WorkerMetrics:
             "Jobs run alone because their previous attempt crashed a worker.",
             registry=r,
         )
+        self.heartbeat_failed = Counter(
+            "qs_heartbeat_failures_total",
+            "Heartbeats that could not reach Postgres (risk: the lease expires).",
+            registry=r,
+        )
         self.lost_lease = Counter(
             "qs_lost_lease_total", "Heartbeats that found the lease taken over.", registry=r
         )
@@ -130,6 +135,7 @@ class WorkerMetrics:
             "republished": self.republished,
             "lost_lease": self.lost_lease,
             "isolated_runs": self.isolated,
+            "heartbeat_failed": self.heartbeat_failed,
             "commit_gave_up": self.commit_gave_up,
             "db_unavailable": self.db_unavailable,
         }.get(name)

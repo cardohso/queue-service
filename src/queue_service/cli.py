@@ -24,7 +24,9 @@ log = logging.getLogger(__name__)
 
 
 async def run_worker(settings: Settings) -> None:
-    pool = await create_pool(settings.database_url, max_size=settings.max_in_flight + 4)
+    # One connection per in-flight job plus one for its heartbeat, plus loops: a heartbeat
+    # that can't get a connection lets a live job's lease expire (a needless duplicate).
+    pool = await create_pool(settings.database_url, max_size=2 * settings.max_in_flight + 4)
     await migrate(pool)
     redis = Redis.from_url(
         settings.redis_url,
