@@ -258,6 +258,38 @@ Valid runs: p99 30-645 ms at 300 req/s, zero errors, depth peak 122-158 for a li
 > Interview version: "Closed-loop load tests hide overload, because the clients slow down
 > with the server. An open-loop test sends at the rate real traffic arrives."
 
+### 7.2 Postgres connection budget (found by the step-8 benchmark)
+
+**What happened.** The first end-to-end benchmark with 4 workers collapsed: 62 jobs/s
+(vs 460 with one worker), p99 31 s, 47 duplicate executions, and 2 of the 4 workers crashed at
+start-up. Postgres allows 100 connections by default; each worker's pool could take 68.
+Three separate defects:
+
+1. **`TooManyConnectionsError` (SQLSTATE 53300) was not classified as an infrastructure
+   error.** Handlers crashed (`handler_crashed`) instead of pausing and backing off, and
+   their messages sat unacked until the lease expired. Now the whole SQLSTATE class 53
+   (too many clients, out of memory, disk full) takes the pause-and-back-off path.
+2. **Start-up did not wait.** A worker that started while Postgres was full (a scale-up!)
+   crashed. Pool creation and the schema check now retry with capped back-off, and stop
+   promptly on SIGTERM; the API retries for up to 60 s. New failure test
+   `postgres_out_of_connections`: it failed on the old code (worker C crashed), passes 3/3 now.
+3. **Pool sizing came from wrong reasoning.** I had sized the worker pool at
+   `2 x max_in_flight + 4` ("a connection per job plus one for its heartbeat"). Connections
+   are borrowed for one millisecond-scale statement, not held for a job. Measured with one
+   worker, 32 jobs in flight, 2000 x 50 ms jobs:
+
+   | worker pool size | 2 | 4 | 8 | 16 | 40 |
+   |---|---|---|---|---|---|
+   | throughput (jobs/s) | 423 | 517 | 512 | 481 | 455 |
+   | peak server connections | 4 | 6 | 10 | 18 | 35 |
+
+   More connections were *slower*. Default is now 8 (`QS_WORKER_DB_POOL_MAX`). Budget rule:
+   `workers x worker pool + API pool <= max_connections` (about 11 workers on a default
+   Postgres). At 4 workers: 33 -> 782 jobs/s for I/O jobs, 9.9 -> 188 jobs/s for CPU jobs.
+
+> Interview version: "Size a pool by how many operations run at once times how long each
+> takes, not by how many jobs you have. I measured it: past 4-8 connections more was slower."
+
 ## 8. Worker pool
 
 - I/O jobs: asyncio tasks under the semaphore, `asyncio.timeout()`. Handlers must be

@@ -88,11 +88,19 @@ async def wait_until(
 class Infra:
     """Postgres + Redis (+ optional toxiproxy) on fixed host ports, so they survive restarts."""
 
-    def __init__(self, *, redis_persistence: bool = True, toxiproxy: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        redis_persistence: bool = True,
+        toxiproxy: bool = False,
+        pg_max_connections: int | None = None,
+    ) -> None:
         self.pg_port, self.redis_port = free_port(), free_port()
         self.pg = PostgresContainer("postgres:17-alpine", driver=None).with_bind_ports(
             5432, self.pg_port
         )
+        if pg_max_connections is not None:
+            self.pg = self.pg.with_command(f"postgres -c max_connections={pg_max_connections}")
         redis_cmd = (
             "redis-server --appendonly yes --appendfsync everysec"
             if redis_persistence
@@ -202,6 +210,51 @@ class Infra:
                     },
                 )
                 assert r.status_code in (200, 201), r.text
+
+
+class ConnectionHog:
+    """Fills every free connection slot of a Postgres server, and keeps refilling any slot
+    that frees up: "the database is at its connection limit". Releasing it ends the fault."""
+
+    def __init__(self, infra: Infra) -> None:
+        self._infra = infra
+        self._held: list[asyncpg.Connection[Any]] = []
+        self._task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+
+    @property
+    def pids(self) -> set[int]:
+        return {c.get_server_pid() for c in self._held}
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._fill())
+
+        # Done when the server is full: a further connection is refused.
+        async def full() -> bool:
+            try:
+                conn = await asyncpg.connect(self._infra.pg_url, timeout=2)
+            except asyncpg.TooManyConnectionsError:
+                return True
+            await conn.close()
+            return False
+
+        await wait_until(full, 30, "postgres at its connection limit", 0.05)
+
+    async def _fill(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._held.append(await asyncpg.connect(self._infra.pg_url, timeout=2))
+            except asyncpg.TooManyConnectionsError, OSError, TimeoutError:
+                await asyncio.sleep(0.005)
+
+    async def release(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            await self._task
+        for c in self._held:
+            with contextlib.suppress(Exception):
+                await c.close()
+        self._held.clear()
 
 
 async def _ok(resp: Awaitable[httpx.Response]) -> bool:

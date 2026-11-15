@@ -34,4 +34,7 @@ DB_INFRA_ERRORS: tuple[type[BaseException], ...] = (
     asyncpg.InterfaceError,
     asyncpg.PostgresConnectionError,
     asyncpg.exceptions.OperatorInterventionError,  # e.g. admin shutdown, cannot connect now
+    # SQLSTATE class 53: "too many clients already", out of memory/disk. Found by a failure
+    # test: unclassified, it crashed handlers and start-up instead of pausing and backing off.
+    asyncpg.exceptions.InsufficientResourcesError,
 )

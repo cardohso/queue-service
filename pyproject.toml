@@ -44,11 +44,12 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "SIM", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/failure/*" = ["E501"]  # long inline SQL reads better unwrapped
+"bench/report.py" = ["E501"]  # prose lines of the generated document
 
 [tool.mypy]
 strict = true
 python_version = "3.14"
-files = ["src", "tests"]
+files = ["src", "tests", "bench"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

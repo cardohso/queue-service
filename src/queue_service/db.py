@@ -1,9 +1,15 @@
 """Postgres schema and connection pool. Postgres is the source of truth (DESIGN.md s2)."""
 
+import asyncio
 import json
+import logging
 from typing import Any
 
 import asyncpg
+
+from queue_service.errors import DB_INFRA_ERRORS
+
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -81,3 +87,61 @@ async def migrate(pool: asyncpg.Pool[Any]) -> None:
             await conn.execute(SCHEMA)
         finally:
             await conn.execute("SELECT pg_advisory_unlock($1)", _MIGRATION_LOCK_ID)
+
+
+async def open_pool_with_retry(
+    url: str,
+    *,
+    max_size: int,
+    stop: asyncio.Event | None = None,
+    give_up_after_s: float | None = None,
+    initial_delay_s: float = 0.2,
+    max_delay_s: float = 5.0,
+) -> asyncpg.Pool[Any] | None:
+    """Connect and create the schema, retrying infrastructure errors with capped back-off.
+
+    A process that starts while Postgres is full, restarting or unreachable (a scale-up, a
+    rolling deploy, a database failover) should wait for it, not crash and rely on its
+    supervisor to retry. Returns None if ``stop`` is set while waiting. With
+    ``give_up_after_s`` the last error is raised after that long (API start-up).
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    delay = initial_delay_s
+    while True:
+        pool: asyncpg.Pool[Any] | None = None
+        try:
+            pool = await create_pool(url, max_size=max_size)
+            await migrate(pool)
+            return pool
+        except DB_INFRA_ERRORS as exc:
+            if pool is not None:
+                await pool.close()
+            if give_up_after_s is not None and loop.time() - started > give_up_after_s:
+                raise
+            log.warning("db_connect_retry", extra={"error": repr(exc), "retry_in_s": delay})
+            if stop is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    async with asyncio.timeout(delay):
+                        await stop.wait()
+                    return None
+                except TimeoutError:
+                    pass
+            delay = min(delay * 2, max_delay_s)
+
+
+async def warn_if_pool_exceeds_server(pool: asyncpg.Pool[Any], pool_max: int, who: str) -> None:
+    """Log the connection budget. N workers x pool size must fit under max_connections."""
+    try:
+        async with pool.acquire(timeout=5) as conn:
+            server_max = int(await conn.fetchval("SHOW max_connections"))
+    except DB_INFRA_ERRORS:
+        return
+    level = logging.WARNING if pool_max * 2 > server_max else logging.INFO
+    log.log(
+        level,
+        "db_connection_budget",
+        extra={"who": who, "pool_max": pool_max, "server_max_connections": server_max},
+    )

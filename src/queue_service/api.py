@@ -18,7 +18,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from queue_service.admission import Admission, ConcurrencyLimit, DepthSampler, Overloaded
 from queue_service.config import Settings
-from queue_service.db import create_pool, migrate
+from queue_service.db import open_pool_with_retry, warn_if_pool_exceeds_server
 from queue_service.ingest import (
     IdempotencyConflict,
     RedisPublisher,
@@ -49,8 +49,11 @@ class Deps:
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
-    pool = await create_pool(settings.database_url, max_size=settings.db_pool_max_size)
-    await migrate(pool)
+    pool = await open_pool_with_retry(
+        settings.database_url, max_size=settings.db_pool_max_size, give_up_after_s=60
+    )
+    assert pool is not None  # only None when a stop event is given
+    await warn_if_pool_exceeds_server(pool, settings.db_pool_max_size, "api")
     redis = Redis.from_url(
         settings.redis_url,
         decode_responses=True,

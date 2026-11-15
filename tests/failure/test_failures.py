@@ -20,9 +20,19 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import asyncpg
 from redis.asyncio import Redis
 
-from tests.failure.harness import Cluster, Infra, Report, fail, io, poison, wait_until
+from tests.failure.harness import (
+    Cluster,
+    ConnectionHog,
+    Infra,
+    Report,
+    fail,
+    io,
+    poison,
+    wait_until,
+)
 
 LEASE_S = 2.0  # FAST_ENV QS_LEASE_S
 
@@ -251,6 +261,52 @@ async def test_postgres_slow_100ms_each_way(
     assert rep.done == rep.jobs
     assert c.client_stats["503"] == 0, "slow is not overloaded: latency alone must not cause 503s"
     assert rep.extra_executions == 0, "slow is not dead: latency alone must not cause duplicates"
+
+
+async def test_postgres_out_of_connections(
+    make_infra: Callable[..., Infra], make_cluster: Any
+) -> None:
+    """Postgres refuses new connections ("too many clients"), as when many workers scale up.
+
+    While it is full, running services lose their pooled connections and a new worker starts.
+    Nothing may crash or lose a job; everything must resume once slots free up.
+    """
+    outage_s = 6.0
+    infra = make_infra(pg_max_connections=40)
+    c: Cluster = make_cluster(infra)
+    await c.worker("A")
+    await c.worker("B")
+    await c.api()
+    control = await asyncpg.connect(infra.pg_url)  # kept open: used to kill sessions later
+    submitting = asyncio.create_task(c.submit_many([io(100) for _ in range(300)], "conn", 8))  # noqa: RUF006 - awaited below
+    await wait_until(lambda: _ge(_done_count(c), 50), 60, "50 jobs done before the fault")
+
+    hog = ConnectionHog(infra)
+    await hog.start()
+    # Free every slot the services were using, so they must reconnect into a full server.
+    await control.execute(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+        "WHERE pid <> ALL($1::int[]) AND pid <> pg_backend_pid()",
+        list(hog.pids),
+    )
+    scale_up = await c.worker("C", wait_ready=False)  # starts while the server is full
+    await asyncio.sleep(outage_s)  # the outage length is the input of the test
+    died = [p.name for p in c.procs if not p.alive]
+    await hog.release()
+    await control.close()
+    t_back = await c.db_now()
+
+    assert not died, f"processes crashed during the outage: {died}\n" + c.log_tails(6)
+    await c._wait_http(scale_up, "/readyz", 60)
+    ids = await asyncio.wait_for(submitting, 120)
+    await c.wait_final(ids, 120)
+    await c.wait_stream_drained(60)
+    rep = await c.check_invariant("postgres_out_of_connections", ids)
+    rep.recovery_s = await _first_done_after(c, t_back)
+    rep.notes |= {"outage_s": outage_s, "pg_max_connections": 40}
+    rep.save()
+    assert rep.done == rep.jobs
+    assert all(p.alive for p in c.procs), "a process died after the outage"
 
 
 # ---- 4. poison messages ----------------------------------------------------------------------

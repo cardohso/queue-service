@@ -13,7 +13,11 @@ from redis.asyncio import Redis
 from queue_service.api import create_app
 from queue_service.broker import RedisBroker
 from queue_service.config import Settings
-from queue_service.db import create_pool, migrate
+from queue_service.db import (
+    create_pool,
+    open_pool_with_retry,
+    warn_if_pool_exceeds_server,
+)
 from queue_service.executor import Executor
 from queue_service.logs import configure_logging
 from queue_service.ops import Response, start_ops_server, text
@@ -24,10 +28,24 @@ log = logging.getLogger(__name__)
 
 
 async def run_worker(settings: Settings) -> None:
-    # One connection per in-flight job plus one for its heartbeat, plus loops: a heartbeat
-    # that can't get a connection lets a live job's lease expire (a needless duplicate).
-    pool = await create_pool(settings.database_url, max_size=2 * settings.max_in_flight + 4)
-    await migrate(pool)
+    stop = asyncio.Event()
+    workers: list[Worker] = []
+
+    def on_signal() -> None:
+        stop.set()  # also ends the wait for Postgres below
+        for w in workers:
+            w.stop()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, on_signal)
+
+    pool_max = settings.worker_db_pool_max
+    pool = await open_pool_with_retry(settings.database_url, max_size=pool_max, stop=stop)
+    if pool is None:
+        log.info("worker_stopped_before_start")
+        return
+    await warn_if_pool_exceeds_server(pool, pool_max, f"worker {settings.worker_id or '-'}")
     redis = Redis.from_url(
         settings.redis_url,
         decode_responses=True,
@@ -57,9 +75,9 @@ async def run_worker(settings: Settings) -> None:
         settings.ops_port,
         {"/healthz": healthz, "/readyz": readyz, "/metrics": metrics},
     )
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, worker.stop)
+    workers.append(worker)
+    if stop.is_set():
+        worker.stop()
     log.info("worker_started", extra={"worker_id": worker.worker_id, "ops_port": settings.ops_port})
     try:
         await worker.run()

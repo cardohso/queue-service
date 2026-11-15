@@ -61,6 +61,13 @@ class Settings:
     # lease expiry (it then gets redelivered; the fence stops a late double commit).
     commit_retry_s: float = 10.0
     worker_db_acquire_timeout_s: float = 2.0
+    # Per-worker Postgres pool. A worker needs few connections, not one per in-flight job:
+    # claims and commits are millisecond operations. Measured (1 worker, 32 jobs in flight,
+    # 2000 x 50 ms jobs): pool 4 = 517 jobs/s, 8 = 512, 16 = 481, 40 = 455, so more is not
+    # faster, it is slower. Connection budget: workers * this + API pool <= max_connections
+    # (default 100 fits about 11 workers). Exceeding it is survivable (the error is classified
+    # as infrastructure) but throughput collapses while workers back off.
+    worker_db_pool_max: int = 8
     worker_redis_timeout_s: float = 5.0  # must exceed block_ms
 
     @classmethod
