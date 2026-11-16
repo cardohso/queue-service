@@ -1,0 +1,20 @@
+{
+  "test": "postgres_paused",
+  "jobs": 300,
+  "done": 300,
+  "dead": 0,
+  "executions": 303,
+  "extra_executions": 3,
+  "interrupted": 3,
+  "dead_reasons": {},
+  "recovery_s": 0.067856,
+  "notes": {
+    "client": {
+      "202": 300,
+      "transport_error": 1
+    },
+    "outage_s": 5.0,
+    "worker_A_commit_gave_up": 2.0,
+    "worker_A_db_unavailable": 2.0
+  }
+}

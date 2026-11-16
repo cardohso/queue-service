@@ -1,0 +1,36 @@
+{
+  "test": "api_flood",
+  "jobs": 610,
+  "done": 610,
+  "dead": 0,
+  "executions": 610,
+  "extra_executions": 0,
+  "interrupted": 0,
+  "dead_reasons": {},
+  "recovery_s": null,
+  "notes": {
+    "client": {},
+    "load": "open loop, 300 req/s for 8 s, 4 procs",
+    "requests": 2400,
+    "codes": {
+      "202": 610,
+      "429": 1790
+    },
+    "latency_ms": {
+      "p50": 3.5,
+      "p95": 14.1,
+      "p99": 101.8,
+      "max": 142.8,
+      "mean": 7.2
+    },
+    "p99_ms_by_code": {
+      "202": 122.2,
+      "429": 79.0
+    },
+    "client_send_lateness_p99_ms": 43.7,
+    "offered_rate_per_s": 300.4,
+    "max_depth_limit": 100,
+    "max_observed_depth": 123,
+    "api_loop_lag_mean_ms": 0.84
+  }
+}

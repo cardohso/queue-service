@@ -1,0 +1,19 @@
+{
+  "test": "redis_restart_no_persistence",
+  "jobs": 400,
+  "done": 400,
+  "dead": 0,
+  "executions": 400,
+  "extra_executions": 0,
+  "interrupted": 0,
+  "dead_reasons": {},
+  "recovery_s": 0.904822,
+  "notes": {
+    "client": {
+      "202": 400
+    },
+    "redis_persistence": false,
+    "redis_down_s": 0.31,
+    "fault_at": "2026-11-16 14:51:45.047909+00:00"
+  }
+}

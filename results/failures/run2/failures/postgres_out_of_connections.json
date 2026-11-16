@@ -1,0 +1,18 @@
+{
+  "test": "postgres_out_of_connections",
+  "jobs": 300,
+  "done": 300,
+  "dead": 0,
+  "executions": 300,
+  "extra_executions": 0,
+  "interrupted": 0,
+  "dead_reasons": {},
+  "recovery_s": null,
+  "notes": {
+    "client": {
+      "202": 300
+    },
+    "outage_s": 6.0,
+    "pg_max_connections": 40
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "test": "postgres_slow_100ms",
+  "jobs": 150,
+  "done": 150,
+  "dead": 0,
+  "executions": 150,
+  "extra_executions": 0,
+  "interrupted": 0,
+  "dead_reasons": {},
+  "recovery_s": null,
+  "notes": {
+    "client": {
+      "202": 150
+    },
+    "latency_ms_each_way": 100,
+    "wall_s": 31.61
+  }
+}

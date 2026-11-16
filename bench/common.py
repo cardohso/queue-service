@@ -56,6 +56,30 @@ def machine_info() -> dict[str, Any]:
     return info
 
 
+def settle(max_wait_s: float = 150.0) -> tuple[float, float, float]:
+    """Wait for the machine to calm down, then return the load average (1/5/15 min).
+
+    Starting a benchmark right after other work measures that work too (the 1-minute load
+    average includes the previous command). Waits until the 1-minute load is under 60 % of
+    the core count or max_wait_s passes, and the result records whichever happened.
+    """
+    import os
+    import time
+
+    limit = 0.6 * (os.cpu_count() or 1)
+    start = time.monotonic()
+    while os.getloadavg()[0] > limit and time.monotonic() - start < max_wait_s:
+        time.sleep(5)
+    load = os.getloadavg()
+    waited = time.monotonic() - start
+    print(
+        f"load average {load[0]:.1f}/{load[1]:.1f}/{load[2]:.1f} after waiting {waited:.0f} s "
+        f"(target < {limit:.1f})",
+        flush=True,
+    )
+    return load
+
+
 def percentile(xs: list[float], q: float) -> float:
     """Nearest-rank percentile; q in [0, 1]."""
     s = sorted(xs)

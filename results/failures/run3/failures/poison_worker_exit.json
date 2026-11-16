@@ -1,0 +1,23 @@
+{
+  "test": "poison_worker_exit",
+  "jobs": 60,
+  "done": 59,
+  "dead": 1,
+  "executions": 68,
+  "extra_executions": 8,
+  "interrupted": 9,
+  "dead_reasons": {
+    "crashed_max_attempts": 1
+  },
+  "recovery_s": null,
+  "notes": {
+    "client": {
+      "202": 60
+    },
+    "worker_restarts": 3,
+    "innocent_jobs_crashed": 6,
+    "innocent_jobs_crashed_only_alongside_poison": 6,
+    "innocent_jobs_dead_lettered": 0,
+    "max_crashes_charged_to_an_innocent_job": 1
+  }
+}

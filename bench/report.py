@@ -54,10 +54,19 @@ def machine_md(m: dict[str, Any], load: list[float] | None) -> str:
         f"- Python: {m['python_impl']} {m['python']}, GIL {gil}\n"
     )
     if load:
+        limit = 0.6 * (m.get("logical_cpus") or 1)
         s += (
             f"- Machine load average at start (1/5/15 min): {load[0]:.1f} / {load[1]:.1f} / "
-            f"{load[2]:.1f} (a personal laptop, not an idle benchmark box)\n"
+            f"{load[2]:.1f} on {m.get('logical_cpus')} cores\n"
         )
+        if load[0] > limit:
+            s += (
+                f"- **Not a quiet machine:** the benchmark waits up to 150 s for the 1-minute "
+                f"load to fall under {limit:.1f} and this run never got there (other "
+                "applications were using several cores). Parallel-scaling numbers are therefore "
+                "pessimistic and the spreads wider than on an idle box. Rerun with "
+                "`scripts/run_benchmarks.sh bench` after closing heavy applications.\n"
+            )
     return s
 
 
@@ -137,7 +146,7 @@ def executors_md(d: dict[str, Any]) -> str:
 # ---- end to end ------------------------------------------------------------------------------
 
 
-def e2e_md(d: dict[str, Any]) -> str:
+def e2e_md(d: dict[str, Any], cpu_ms: float | None) -> str:
     p, rows = d["params"], d["results"]
     g = group(rows, "kind", "workers")
     out = [
@@ -154,7 +163,13 @@ def e2e_md(d: dict[str, Any]) -> str:
     ]
     for kind, title, n in (
         ("io", f"I/O jobs ({p['io_wait_ms']} ms wait)", p["jobs"]["io"]),
-        ("cpu", f"CPU jobs (~{p.get('cpu_job_ms', 10)} ms of hashing)", p["jobs"]["cpu"]),
+        (
+            "cpu",
+            f"CPU jobs ({p['cpu_job_iterations']} sha256 iterations"
+            + (f", {cpu_ms:.1f} ms on one core per section 1" if cpu_ms else "")
+            + ")",
+            p["jobs"]["cpu"],
+        ),
     ):
         out.append(f"### {title}, {n} jobs per run\n")
         out.append(
@@ -175,8 +190,19 @@ def e2e_md(d: dict[str, Any]) -> str:
         wn = statistics.median(r["throughput"] for r in g[(kind, p["workers"][-1])])
         out.append(
             f"\nScaling: {p['workers'][-1]} workers deliver {wn / w1:.2f}x the throughput of "
-            f"{p['workers'][0]} (ideal: {p['workers'][-1] / p['workers'][0]:.0f}x).\n"
+            f"{p['workers'][0]} (ideal: {p['workers'][-1] / p['workers'][0]:.0f}x)."
         )
+        if kind == "cpu" and cpu_ms:
+            p50 = statistics.median(r["p50_ms"] for r in g[(kind, p["workers"][0])])
+            out.append(
+                f"\nAttempt latency (p50 {p50:.0f} ms for a {cpu_ms:.0f} ms job) is mostly "
+                "**queueing inside the worker**: up to "
+                f"{p['max_in_flight_per_worker']} CPU jobs are in flight but each worker has "
+                f"{p['cpu_children_per_worker']} CPU child process, so they wait for it, and "
+                "the job timeout and lease clock run while they wait. This is a known design "
+                "gap (DESIGN.md promised a separate CPU limit); see README known limits."
+            )
+        out.append("")
     return "\n".join(out)
 
 
@@ -235,7 +261,7 @@ def failures_md() -> str | None:
         dead = spread([r["dead"] for r in rs], 0)
         rec = [r["recovery_s"] for r in rs if r["recovery_s"] is not None]
         out.append(
-            f"| `{name}` | {rs[0]['jobs']} | {done} / {dead} | 0 | 0 "
+            f"| `{name}` | {spread([r['jobs'] for r in rs], 0)} | {done} / {dead} | 0 | 0 "
             f"| {spread([r['extra_executions'] for r in rs], 0)} "
             f"| {spread(rec, 2) if rec else '-'} |"
         )
@@ -286,8 +312,12 @@ def main() -> None:
     ex, e2e = load(R / "bench/executors.json"), load(R / "bench/e2e.json")
     if ex:
         parts.append(executors_md(ex))
+    cpu_ms = None
+    if ex:
+        gx = group(ex["results"], "kind", "mode", "workers")
+        cpu_ms = float(statistics.median(r["p50_ms"] for r in gx[("cpu", "processes", 1)]))
     if e2e:
-        parts.append(e2e_md(e2e))
+        parts.append(e2e_md(e2e, cpu_ms))
     fm = failures_md()
     if fm:
         parts.append(fm)

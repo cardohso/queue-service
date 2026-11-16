@@ -1,0 +1,19 @@
+{
+  "test": "poison_child_exit",
+  "jobs": 60,
+  "done": 59,
+  "dead": 1,
+  "executions": 62,
+  "extra_executions": 2,
+  "interrupted": 0,
+  "dead_reasons": {
+    "exhausted": 1
+  },
+  "recovery_s": null,
+  "notes": {
+    "client": {
+      "202": 60
+    },
+    "worker_restarts": 0
+  }
+}

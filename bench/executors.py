@@ -27,7 +27,7 @@ import threading
 import time
 from typing import Any
 
-from bench.common import machine_info, percentile, save
+from bench.common import machine_info, percentile, save, settle
 
 DURATION_S = float(sys.argv[1]) if len(sys.argv) > 1 else 2.0
 RUNS = int(os.environ.get("QS_BENCH_RUNS", "5"))
@@ -115,6 +115,11 @@ def run_asyncio(
             else:
                 cpu_work(iterations)  # inline: blocks the loop. That is the point.
             lat.append(time.perf_counter() - t)
+            if kind == "cpu":
+                # A real handler yields between jobs. Without this the first slot would run
+                # for the whole window, the other slots and the lag probe would never run, and
+                # the stall figure would read 0 (it did, in the first version of this report).
+                await asyncio.sleep(0)
         return lat
 
     async def main() -> list[float]:
@@ -170,7 +175,7 @@ def one_run(
 
 
 def main() -> None:
-    load_at_start = os.getloadavg()  # 1/5/15 min: this is a shared laptop, record how busy it was
+    load_at_start = settle()  # a shared laptop: wait for quiet, then record how busy it was
     iterations = calibrate_cpu_iterations()
     print(f"CPU job = {iterations} sha256 iterations (~{CPU_TARGET_S * 1000:.0f} ms)", flush=True)
     ctx = mp.get_context("spawn")

@@ -1,0 +1,19 @@
+{
+  "test": "poison_permanent",
+  "jobs": 60,
+  "done": 59,
+  "dead": 1,
+  "executions": 60,
+  "extra_executions": 0,
+  "interrupted": 0,
+  "dead_reasons": {
+    "permanent": 1
+  },
+  "recovery_s": null,
+  "notes": {
+    "client": {
+      "202": 60
+    },
+    "worker_restarts": 0
+  }
+}

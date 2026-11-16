@@ -29,7 +29,7 @@ import asyncpg
 from redis.asyncio import Redis
 from tests.failure.harness import Cluster, Infra, wait_until
 
-from bench.common import machine_info, percentile, save
+from bench.common import machine_info, percentile, save, settle
 from bench.executors import calibrate_cpu_iterations
 
 RUNS = int(os.environ.get("QS_BENCH_RUNS", "3"))
@@ -132,7 +132,7 @@ async def measure(infra: Infra, n: int) -> dict[str, Any]:
 
 
 async def main() -> None:
-    load_at_start = os.getloadavg()
+    load_at_start = settle()
     iterations = calibrate_cpu_iterations()
     infra = Infra().start()
     results: list[dict[str, Any]] = []
