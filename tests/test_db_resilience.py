@@ -143,3 +143,17 @@ async def test_startup_does_not_swallow_non_infrastructure_errors(
     patch_db(monkeypatch, [], [asyncpg.exceptions.SyntaxOrAccessError("bad schema")])
     with pytest.raises(asyncpg.exceptions.SyntaxOrAccessError):
         await db.open_pool_with_retry("x", max_size=5, initial_delay_s=0.0)
+
+
+def test_client_state_error_from_a_killed_connection_is_an_infrastructure_error() -> None:
+    # asyncpg raises this when a connection dies mid-operation; once it escaped as HTTP 500.
+    exc = asyncpg.exceptions.InternalClientError("cannot switch to state 15; another operation")
+    assert isinstance(exc, DB_INFRA_ERRORS)
+
+
+def test_api_error_tuple_covers_integrity_errors_but_workers_do_not() -> None:
+    from queue_service.errors import DB_ERRORS
+
+    unique = asyncpg.exceptions.UniqueViolationError("dup")
+    assert isinstance(unique, DB_ERRORS)  # an API request reports it as 503, not a crash
+    assert not isinstance(unique, DB_INFRA_ERRORS)  # a worker must not wait out a bug

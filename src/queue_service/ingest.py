@@ -9,6 +9,7 @@ import asyncpg
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from queue_service.errors import DB_ERRORS
 from queue_service.schemas import AnyJob, request_hash
 
 log = logging.getLogger(__name__)
@@ -100,6 +101,6 @@ async def mark_dispatched(
                 job_id,
                 entry_id,
             )
-    except asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError:
+    except DB_ERRORS:
         # Harmless: an unmarked job is simply republished later, and the claim is conditional.
         log.warning("mark_dispatched_failed", extra={"job_id": str(job_id)})

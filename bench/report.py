@@ -11,6 +11,7 @@ Run: ``uv run python -m bench.report``
 
 import json
 import statistics
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -182,6 +183,22 @@ def e2e_md(d: dict[str, Any]) -> str:
 # ---- failure tests ---------------------------------------------------------------------------
 
 
+def junit_outcomes(run_dirs: list[Path]) -> dict[str, list[str | None]]:
+    """test name -> per run: None if it passed, else the first line of its failure message."""
+    out: dict[str, list[str | None]] = defaultdict(list)
+    for rd in run_dirs:
+        xml = rd.parent / "junit.xml"
+        if not xml.exists():
+            continue
+        for tc in ET.parse(xml).getroot().iter("testcase"):
+            bad = tc.find("failure")
+            if bad is None:
+                bad = tc.find("error")
+            msg = None if bad is None else (bad.get("message") or "failed").splitlines()[0][:160]
+            out[tc.get("name", "?")].append(msg)
+    return out
+
+
 def failures_md() -> str | None:
     runs = sorted((R / "failures").glob("run*/failures"))
     if not runs:
@@ -240,6 +257,21 @@ def failures_md() -> str | None:
             f"against a limit of {n0['max_depth_limit']} (the limit is soft: admission uses a "
             "sampled depth).\n"
         )
+    outcomes = junit_outcomes(runs)
+    if outcomes:
+        total = max(len(v) for v in outcomes.values())
+        out.append(f"### Pass rate over {total} runs\n")
+        out.append("| test | passed |")
+        out.append("|---|---|")
+        for name in sorted(outcomes):
+            res = outcomes[name]
+            out.append(f"| `{name}` | {sum(1 for m in res if m is None)} / {len(res)} |")
+        bad = [(n, msg) for n, rs in sorted(outcomes.items()) for msg in rs if msg is not None]
+        if bad:
+            out.append("\n**Failures observed (kept, not retried away):**\n")
+            for n, msg in bad:
+                out.append(f"- `{n}`: {msg}")
+        out.append("")
     return "\n".join(out)
 
 

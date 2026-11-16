@@ -528,6 +528,15 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
         xs = sorted(xs)
         return xs[min(len(xs) - 1, int(q * len(xs)))]
 
+    # Measured on an M1 Pro (8 cores) shared with Docker: healthy runs 2-30 ms; one busy run
+    # 149 ms with valid results. Beyond 200 ms the generator, not the API, is the bottleneck.
+    # The measurement is only valid if the client really sent at the intended rate. Checked
+    # BEFORE saving, so an invalid run never leaves numbers behind to be reported.
+    assert pct(send_lateness, 0.99) < 0.2, (
+        f"load generator fell behind (p99 {pct(send_lateness, 0.99) * 1000:.0f} ms late): "
+        "result not valid; the machine is too busy for this measurement"
+    )
+
     rep.notes |= {
         "load": f"open loop, {FLOOD_RATE_PER_S} req/s for {FLOOD_SECONDS} s, {FLOOD_GENERATORS} procs",
         "requests": sum(codes.values()),
@@ -552,9 +561,6 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
     rep.save()
 
     # The measurement is only valid if the client really sent at the intended rate.
-    # Measured on an M1 Pro (8 cores) shared with Docker: healthy runs 2-30 ms; one busy run
-    # 149 ms with valid results. Beyond 200 ms the generator, not the API, is the bottleneck.
-    assert pct(send_lateness, 0.99) < 0.2, "load generator fell behind: result not valid"
     assert codes[429] > 0, "the flood never triggered back-pressure"
     assert set(codes) <= {202, 429}, f"errors under load: {dict(codes)}"
     assert missing_retry_after == 0

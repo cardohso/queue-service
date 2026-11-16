@@ -19,6 +19,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from queue_service.admission import Admission, ConcurrencyLimit, DepthSampler, Overloaded
 from queue_service.config import Settings
 from queue_service.db import open_pool_with_retry, warn_if_pool_exceeds_server
+from queue_service.errors import DB_ERRORS
 from queue_service.ingest import (
     IdempotencyConflict,
     RedisPublisher,
@@ -30,7 +31,7 @@ from queue_service.schemas import AnyJob, JobAccepted, JobRequest, JobStatus
 
 log = logging.getLogger(__name__)
 
-_DB_ERRORS = (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError)
+_DB_ERRORS = DB_ERRORS
 
 
 @dataclass(slots=True)

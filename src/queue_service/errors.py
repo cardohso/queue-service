@@ -37,4 +37,14 @@ DB_INFRA_ERRORS: tuple[type[BaseException], ...] = (
     # SQLSTATE class 53: "too many clients already", out of memory/disk. Found by a failure
     # test: unclassified, it crashed handlers and start-up instead of pausing and backing off.
     asyncpg.exceptions.InsufficientResourcesError,
+    # "cannot switch to state N; another operation is in progress": the client library's state
+    # error when a connection is killed mid-operation (failover, pg_terminate_backend, a proxy
+    # reset). Not a PostgresError or InterfaceError, so it escaped as an HTTP 500 and as
+    # handler_crashed; a flaky failure test showed it. The pool discards such a connection.
+    asyncpg.exceptions.InternalClientError,
 )
+
+# Everything that can go wrong talking to Postgres and is worth waiting out or reporting as 503.
+# Integrity violations are PostgresErrors too, but a bug there must not be retried forever;
+# API handlers want both, workers only DB_INFRA_ERRORS.
+DB_ERRORS: tuple[type[BaseException], ...] = (asyncpg.PostgresError, *DB_INFRA_ERRORS)

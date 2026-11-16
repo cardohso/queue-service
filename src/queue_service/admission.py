@@ -15,6 +15,8 @@ import asyncpg
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from queue_service.errors import DB_ERRORS
+
 log = logging.getLogger(__name__)
 
 MAX_RETRY_AFTER_S = 30
@@ -112,7 +114,7 @@ class DepthSampler:
                     "SELECT count(*) FROM jobs WHERE state IN ('queued', 'running', 'retry_wait')"
                 )
             self._admission.update(int(backlog), "postgres")
-        except asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError:
+        except DB_ERRORS:
             # Keep the last known depth; request handling reports 503 on its own.
             log.warning("depth_sample_postgres_failed")
 
