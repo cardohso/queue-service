@@ -1,4 +1,15 @@
-# Local dev dependencies. API and worker services are added in steps 3-4.
+# The whole system: Postgres (source of truth), Redis Streams (dispatch), the ingest API and
+# two workers. `./scripts/demo.sh` starts it, loads it, kills a worker and checks the invariant.
+x-app: &app
+  build: .
+  environment: &app-env
+    QS_DATABASE_URL: postgresql://${POSTGRES_USER:-qs}:${POSTGRES_PASSWORD:-qs_local_dev_only}@postgres:5432/${POSTGRES_DB:-qs}
+    QS_REDIS_URL: redis://redis:6379/0
+    QS_LOG_JSON: "1"
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis: {condition: service_healthy}
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -6,20 +17,52 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-qs}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-qs_local_dev_only}
       POSTGRES_DB: ${POSTGRES_DB:-qs}
-    ports: ["5432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-qs}"]
       interval: 2s
       timeout: 3s
       retries: 20
+
   redis:
     image: redis:8-alpine
-    # AOF on: Redis restarts keep most data. Correctness does NOT depend on it
-    # (Postgres is the source of truth; see docs/DESIGN.md section 2).
+    # AOF on: a Redis restart keeps most data. Correctness does NOT depend on it (Postgres is
+    # the source of truth, docs/DESIGN.md section 2): `redis-server --save "" --appendonly no`
+    # works too, and the failure tests run both.
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
-    ports: ["6379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 3s
       retries: 20
+
+  api:
+    <<: *app
+    command: ["api"]
+    environment:
+      <<: *app-env
+      QS_API_HOST: 0.0.0.0
+    ports: ["8000:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    <<: *app
+    command: ["worker"]
+    deploy:
+      replicas: 2
+    environment:
+      <<: *app-env
+      QS_OPS_HOST: 0.0.0.0
+      # Demo settings: a short lease makes crash recovery visible in seconds. The default is
+      # 30 s (docs/DESIGN.md section 9 explains the trade-off between lease, duplicates and
+      # recovery speed).
+      QS_LEASE_S: "5"
+      QS_RECLAIM_INTERVAL_S: "1"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9100/readyz')"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
