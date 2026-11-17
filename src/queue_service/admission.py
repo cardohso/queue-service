@@ -16,6 +16,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from queue_service.errors import DB_ERRORS
+from queue_service.schemas import JOB_KINDS
 
 log = logging.getLogger(__name__)
 
@@ -119,8 +120,15 @@ class DepthSampler:
             log.warning("depth_sample_postgres_failed")
 
     async def _redis_depth(self) -> int:
+        """Total backlog over the per-kind streams (``<base>:io`` + ``<base>:cpu``)."""
+        total = 0
+        for kind in JOB_KINDS:
+            total += await self._stream_depth(f"{self._stream}:{kind}")
+        return total
+
+    async def _stream_depth(self, stream: str) -> int:
         try:
-            groups = await self._redis.xinfo_groups(self._stream)
+            groups = await self._redis.xinfo_groups(stream)
         except RedisError as exc:
             if "no such key" in str(exc).lower():  # stream not created yet: nothing queued
                 return 0
@@ -131,7 +139,7 @@ class DepthSampler:
                 if lag is not None:
                     return int(lag) + int(g["pending"])
                 break  # Redis reports lag=None when it cannot tell; use stream length instead
-        return int(await self._redis.xlen(self._stream))
+        return int(await self._redis.xlen(stream))
 
     async def run(self) -> None:
         # The caller takes the first sample at startup, so sleep first: no sample races startup.

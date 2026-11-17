@@ -16,6 +16,9 @@ class Message:
     entry_id: str
     job_id: UUID | None  # None if the entry is malformed; it is acked and dropped
     epoch: int
+    # Which broker it came from: "io" / "cpu" for per-kind streams, "all" for a single stream.
+    # Acks, heartbeats and slot accounting go back to the same broker.
+    kind: str = "all"
 
 
 class Broker(Protocol):
@@ -30,20 +33,23 @@ class Broker(Protocol):
     async def entries_exist(self, entry_ids: list[str]) -> dict[str, bool]: ...
 
 
-def _parse(entry_id: Any, fields: Any) -> Message:
+def _parse(entry_id: Any, fields: Any, kind: str) -> Message:
     try:
-        return Message(str(entry_id), UUID(fields["job_id"]), int(fields["epoch"]))
+        return Message(str(entry_id), UUID(fields["job_id"]), int(fields["epoch"]), kind)
     except KeyError, ValueError, TypeError:
         log.error("malformed_entry", extra={"entry_id": str(entry_id)})
-        return Message(str(entry_id), None, 0)
+        return Message(str(entry_id), None, 0, kind)
 
 
 class RedisBroker:
     """Requires a client created with ``decode_responses=True``."""
 
-    def __init__(self, redis: Redis, stream: str, group: str, dead_stream: str) -> None:
+    def __init__(
+        self, redis: Redis, stream: str, group: str, dead_stream: str, kind: str = "all"
+    ) -> None:
         self._r = redis
         self._stream = stream
+        self.kind = kind
         self._group = group
         self._dead_stream = dead_stream
         self._autoclaim_cursor = "0-0"
@@ -73,7 +79,7 @@ class RedisBroker:
             raise
         if not resp:
             return []
-        return [_parse(eid, f) for _, entries in resp for eid, f in entries]
+        return [_parse(eid, f, self.kind) for _, entries in resp for eid, f in entries]
 
     async def autoclaim(self, consumer: str, min_idle_ms: int, count: int) -> list[Message]:
         """Take over entries idle longer than the lease: their worker is presumed dead."""
@@ -93,7 +99,7 @@ class RedisBroker:
             raise
         next_cursor, entries = resp[0], resp[1]
         self._autoclaim_cursor = str(next_cursor)
-        return [_parse(eid, f) for eid, f in entries if f is not None]
+        return [_parse(eid, f, self.kind) for eid, f in entries if f is not None]
 
     async def touch(self, consumer: str, entry_ids: list[str]) -> None:
         """Reset PEL idle time for entries we are still working on (heartbeat)."""

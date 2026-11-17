@@ -10,7 +10,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from queue_service.errors import DB_ERRORS
-from queue_service.schemas import AnyJob, request_hash
+from queue_service.schemas import AnyJob, request_hash, stream_for
 
 log = logging.getLogger(__name__)
 
@@ -74,15 +74,16 @@ async def accept_job(
 class RedisPublisher:
     """Best-effort XADD. Failure is fine: the dispatcher republishes from Postgres."""
 
-    def __init__(self, redis: Redis, stream: str) -> None:
+    def __init__(self, redis: Redis, stream_base: str) -> None:
         self._redis = redis
-        self._stream = stream
+        self._base = stream_base
 
-    async def publish(self, job_id: UUID, epoch: int) -> str | None:
-        """Return the stream entry ID, or None if Redis is unavailable."""
+    async def publish(self, job_id: UUID, epoch: int, job_type: str) -> str | None:
+        """XADD to the job's stream (``<base>:io`` or ``<base>:cpu``). Returns the entry ID,
+        or None if Redis is unavailable."""
         try:
             entry_id = await self._redis.xadd(
-                self._stream, {"job_id": str(job_id), "epoch": str(epoch)}
+                stream_for(self._base, job_type), {"job_id": str(job_id), "epoch": str(epoch)}
             )
         except RedisError, OSError, TimeoutError:
             log.warning("dispatch_failed", extra={"job_id": str(job_id)})

@@ -7,15 +7,14 @@ import asyncio
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
+from queue_service.schemas import job_kind
+
+__all__ = ["ApiMetrics", "LoopLag", "WorkerMetrics", "job_kind"]
+
 # Job durations span ~1 ms (io_sleep) to ~minutes (CPU jobs).
 _DURATION_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120)
 # Event-loop lag: sub-millisecond when healthy; >100 ms means something blocked the loop.
 _LAG_BUCKETS = (0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5)
-
-
-def job_kind(job_type: str) -> str:
-    """Label value for the in-flight gauge and duration histogram: cpu | io."""
-    return "cpu" if job_type == "cpu_hash" else "io"
 
 
 class LoopLag:

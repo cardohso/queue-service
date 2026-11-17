@@ -124,7 +124,7 @@ async def _accept_and_dispatch(deps: Deps, job: AnyJob, idempotency_key: str | N
         deps.metrics.replays.inc()
         return JobAccepted(job_id=accepted.job_id, state="queued")
     deps.metrics.accepted.inc()
-    entry_id = await deps.publisher.publish(accepted.job_id, accepted.epoch)
+    entry_id = await deps.publisher.publish(accepted.job_id, accepted.epoch, job.type)
     if entry_id is not None:
         await mark_dispatched(
             deps.pool,

@@ -13,6 +13,7 @@ import socket
 import time
 import uuid
 from collections import Counter
+from collections.abc import Mapping
 from typing import Protocol
 
 from redis.exceptions import RedisError
@@ -39,12 +40,23 @@ def new_worker_id() -> str:
     return f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
 
 
+ALL = "all"  # the single-stream mode: one broker, one budget (tests, simple deployments)
+
+
 class Worker:
+    """Pulls from one broker per job kind, each with its own slot budget (bulkheads).
+
+    ``broker`` is either one Broker (single stream, ``max_in_flight`` slots) or a mapping
+    ``{"io": ..., "cpu": ...}``: I/O jobs get ``max_in_flight`` slots and CPU jobs get
+    ``max_cpu_in_flight`` (default: one per CPU process), so a CPU job is only claimed when a
+    process is free to run it (DESIGN.md s8.1).
+    """
+
     def __init__(
         self,
         settings: Settings,
         store: Store,
-        broker: Broker,
+        broker: Broker | Mapping[str, Broker],
         executor: JobRunner,
         *,
         worker_id: str | None = None,
@@ -53,12 +65,22 @@ class Worker:
     ) -> None:
         self._s = settings
         self._store = store
-        self._broker = broker
+        self._brokers: dict[str, Broker] = (
+            dict(broker) if isinstance(broker, Mapping) else {ALL: broker}
+        )
+        self._limits: dict[str, int] = (
+            {ALL: settings.max_in_flight}
+            if ALL in self._brokers
+            else {
+                "io": settings.max_in_flight,
+                "cpu": settings.max_cpu_in_flight or settings.cpu_workers,
+            }
+        )
         self._executor = executor
         self.worker_id = worker_id or new_worker_id()  # also the Redis consumer name
         self._rng = rng or random.Random()
-        self._in_flight: set[asyncio.Task[None]] = set()
-        self._slot_freed = asyncio.Event()
+        self._in_flight: dict[str, set[asyncio.Task[None]]] = {k: set() for k in self._brokers}
+        self._slot_freed: dict[str, asyncio.Event] = {k: asyncio.Event() for k in self._brokers}
         self._stopping = asyncio.Event()
         self._isolation = IsolationLock()
         self._db_backoff_s = 0.0
@@ -84,7 +106,7 @@ class Worker:
         if self._stopping.is_set():
             return False
         try:
-            await asyncio.gather(self._store.ping(), self._broker.ping())
+            await asyncio.gather(self._store.ping(), *(b.ping() for b in self._brokers.values()))
         except (*DB_INFRA_ERRORS, *REDIS_INFRA_ERRORS):
             return False
         return True
@@ -94,17 +116,26 @@ class Worker:
     def stop(self) -> None:
         """SIGTERM handler: stop pulling; run() then drains in-flight jobs."""
         self._stopping.set()
-        self._slot_freed.set()
+        self._wake_fetchers()
+
+    def _wake_fetchers(self) -> None:
+        # Every loop re-checks its own budget and the isolation state, so wake them all: a
+        # suspect finishing in one kind is what lets the other kind's loop resume.
+        for ev in self._slot_freed.values():
+            ev.set()
 
     @property
     def in_flight(self) -> int:
-        return len(self._in_flight)
+        return sum(len(t) for t in self._in_flight.values())
+
+    def _all_tasks(self) -> set[asyncio.Task[None]]:
+        return set().union(*self._in_flight.values())
 
     async def run(self) -> None:
         lag_task = asyncio.create_task(self.loop_lag.run(), name="loop-lag")
         await self._ensure_group()
         loops = [
-            asyncio.create_task(self._fetch_loop(), name="fetch"),
+            *(asyncio.create_task(self._fetch_loop(k), name=f"fetch-{k}") for k in self._brokers),
             asyncio.create_task(self._dispatch_loop(), name="dispatch"),
         ]
         # Loops exit on their own once _stopping is set (fetch within block_ms). Not cancelling
@@ -115,9 +146,10 @@ class Worker:
         lag_task.cancel()
 
     async def _drain(self) -> None:
-        if not self._in_flight:
+        tasks = self._all_tasks()
+        if not tasks:
             return
-        _, pending = await asyncio.wait(set(self._in_flight), timeout=self._s.drain_deadline_s)
+        _, pending = await asyncio.wait(tasks, timeout=self._s.drain_deadline_s)
         for task in pending:
             task.cancel()  # _handle sees CancelledError while stopping and releases the job
         await asyncio.gather(*pending, return_exceptions=True)
@@ -126,7 +158,8 @@ class Worker:
         delay = 0.1
         while not self._stopping.is_set():
             try:
-                await self._broker.ensure_group()
+                for b in self._brokers.values():
+                    await b.ensure_group()
                 return
             except REDIS_INFRA_ERRORS as exc:
                 log.warning("ensure_group_failed", extra={"error": repr(exc)})
@@ -135,51 +168,52 @@ class Worker:
 
     # ---- loops -----------------------------------------------------------------------
 
-    async def _fetch_loop(self) -> None:
+    async def _fetch_loop(self, kind: str) -> None:
+        broker, limit = self._brokers[kind], self._limits[kind]
+        tasks, slot_freed = self._in_flight[kind], self._slot_freed[kind]
         redis_delay = 0.1
         loop = asyncio.get_running_loop()
         next_reclaim = loop.time() + self._s.reclaim_interval_s
         while not self._stopping.is_set():
             if await self._paused_for_db():
                 continue
-            free = self._s.max_in_flight - len(self._in_flight)
+            free = limit - len(tasks)
             if free <= 0:
-                # Back-pressure inside the worker: pull nothing until a slot frees up.
-                self._slot_freed.clear()
-                if self._s.max_in_flight - len(self._in_flight) <= 0:
-                    await self._slot_freed.wait()
+                # Back-pressure inside the worker: pull nothing of this kind until one of its
+                # slots frees up. The rest wait in Redis, where any worker can take them.
+                slot_freed.clear()
+                if limit - len(tasks) <= 0:
+                    await slot_freed.wait()
                 continue
             # Recovered work first. It is already a full lease late; if it had to compete
             # with the backlog for slots, crash recovery would take as long as draining the
             # backlog (measured: 6.8 s to detect with a 2 s lease) instead of about one lease.
             if loop.time() >= next_reclaim:
                 next_reclaim = loop.time() + self._s.reclaim_interval_s
-                if await self._reclaim(free):
+                if await self._reclaim(broker, free):
                     continue  # slots changed: recompute before reading new work
             if self._isolation.isolating:
                 # A suspect job is waiting to run alone: pulling new work onto this worker
                 # would put more jobs next to it if it crashes the process again.
-                self._slot_freed.clear()
+                slot_freed.clear()
                 if self._isolation.isolating:
-                    await self._slot_freed.wait()
+                    await slot_freed.wait()
                 continue
             try:
-                messages = await self._broker.read(self.worker_id, free, self._s.block_ms)
+                messages = await broker.read(self.worker_id, free, self._s.block_ms)
                 redis_delay = 0.1
             except REDIS_INFRA_ERRORS as exc:
-                log.warning("read_failed", extra={"error": repr(exc)})
+                log.warning("read_failed", extra={"error": repr(exc), "kind": kind})
                 await self._sleep_or_stop(redis_delay)
                 redis_delay = min(redis_delay * 2, 5.0)
                 continue
             for m in messages:  # spawn even when stopping: they're in our PEL already
                 self._spawn(m)
 
-    async def _reclaim(self, free: int) -> int:
+    async def _reclaim(self, broker: Broker, free: int) -> int:
         """Take over messages idle longer than a lease (their worker is presumed dead)."""
         try:
-            messages = await self._broker.autoclaim(
-                self.worker_id, int(self._s.lease_s * 1000), free
-            )
+            messages = await broker.autoclaim(self.worker_id, int(self._s.lease_s * 1000), free)
         except REDIS_INFRA_ERRORS as exc:
             log.warning("autoclaim_failed", extra={"error": repr(exc)})
             return 0
@@ -205,14 +239,19 @@ class Worker:
         )
         if not items:
             return 0
-        exists = await self._broker.entries_exist([i.entry_id for i in items if i.entry_id])
+        exists: dict[tuple[str, str], bool] = {}
+        for kind, broker in self._brokers.items():
+            ids = [i.entry_id for i in items if i.entry_id and self._kind_for(i.type) == kind]
+            for eid, ok in (await broker.entries_exist(ids)).items():
+                exists[(kind, eid)] = ok
         published = 0
         for item in items:
+            kind = self._kind_for(item.type)
             # An existing entry is still unprocessed (ack deletes it), so it will be delivered
             # or reclaimed: republishing would only create duplicates.
-            if item.entry_id is not None and exists.get(item.entry_id, False):
+            if item.entry_id is not None and exists.get((kind, item.entry_id), False):
                 continue
-            entry_id = await self._broker.publish(item.job_id, item.epoch)
+            entry_id = await self._brokers[kind].publish(item.job_id, item.epoch)
             await self._store.set_entry(item.job_id, item.epoch, entry_id)
             published += 1
         self._count("republished", published)
@@ -220,14 +259,28 @@ class Worker:
 
     # ---- one message -----------------------------------------------------------------
 
-    def _spawn(self, message: Message) -> None:
-        task = asyncio.create_task(self._handle(message))
-        self._in_flight.add(task)
-        task.add_done_callback(self._on_done)
+    def _kind_for(self, job_type: str) -> str:
+        """Which of our brokers a job of this type belongs to."""
+        return ALL if ALL in self._brokers else job_kind(job_type)
 
-    def _on_done(self, task: asyncio.Task[None]) -> None:
-        self._in_flight.discard(task)
-        self._slot_freed.set()
+    def _slot_kind(self, message: Message) -> str:
+        """The budget a message counts against: the broker it came from. (Not `.get(k) or
+        default`: an empty task set is falsy, and that once sent every CPU job to the I/O
+        budget, so the CPU limit was never applied.)"""
+        return message.kind if message.kind in self._brokers else next(iter(self._brokers))
+
+    def _broker_of(self, message: Message) -> Broker:
+        return self._brokers[self._slot_kind(message)]
+
+    def _spawn(self, message: Message) -> None:
+        tasks = self._in_flight[self._slot_kind(message)]
+        task = asyncio.create_task(self._handle(message))
+        tasks.add(task)
+        task.add_done_callback(lambda t: self._on_done(t, tasks))
+
+    def _on_done(self, task: asyncio.Task[None], tasks: set[asyncio.Task[None]]) -> None:
+        tasks.discard(task)
+        self._wake_fetchers()
         if not task.cancelled() and (exc := task.exception()) is not None:
             log.error("handler_crashed", exc_info=exc)
 
@@ -386,7 +439,7 @@ class Worker:
                 self._count("lost_lease")
                 return
             with contextlib.suppress(*REDIS_INFRA_ERRORS):
-                await self._broker.touch(self.worker_id, [message.entry_id])
+                await self._broker_of(message).touch(self.worker_id, [message.entry_id])
 
     async def _release(self, claim: Claim, message: Message) -> None:
         """Graceful shutdown: hand the job back now instead of after lease expiry.
@@ -396,11 +449,12 @@ class Worker:
         """
         try:
             if await self._store.release(claim):
-                entry_id = await self._broker.publish(claim.job_id, claim.epoch)
+                broker = self._brokers[self._kind_for(claim.type)]
+                entry_id = await broker.publish(claim.job_id, claim.epoch)
                 await self._store.set_entry(claim.job_id, claim.epoch, entry_id)
                 self._count("released")
                 self.metrics.jobs.labels("released").inc()
-            await self._broker.ack(message.entry_id)
+            await self._broker_of(message).ack(message.entry_id)
         except (*DB_INFRA_ERRORS, *REDIS_INFRA_ERRORS) as exc:
             log.warning("release_failed", extra={"error": repr(exc)})
 
@@ -408,7 +462,7 @@ class Worker:
 
     async def _ack_quietly(self, message: Message) -> None:
         try:
-            await self._broker.ack(message.entry_id)
+            await self._broker_of(message).ack(message.entry_id)
         except REDIS_INFRA_ERRORS as exc:
             # Safe: the entry stays in our PEL, gets reclaimed, and the claim rejects it.
             log.warning("ack_failed", extra={"entry_id": message.entry_id, "error": repr(exc)})
@@ -417,7 +471,7 @@ class Worker:
         if message.job_id is None:
             return
         try:
-            await self._broker.publish_dead(message.job_id, message.epoch, reason)
+            await self._broker_of(message).publish_dead(message.job_id, message.epoch, reason)
         except REDIS_INFRA_ERRORS as exc:
             log.warning("dlq_publish_failed", extra={"error": repr(exc)})
 

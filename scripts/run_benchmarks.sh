@@ -2,6 +2,7 @@
 # Regenerate every number in docs/RESULTS.md.
 #   scripts/run_benchmarks.sh            all stages (about 25 minutes)
 #   scripts/run_benchmarks.sh bench      executor + end-to-end benchmarks only
+#   scripts/run_benchmarks.sh e2e        end-to-end benchmark only (about 6 minutes)
 #   scripts/run_benchmarks.sh failures   failure suite 3x only
 #   scripts/run_benchmarks.sh report     regenerate docs/RESULTS.md from results/
 # Needs Docker. Do not run other heavy work meanwhile: it is a benchmark, and the machine's
@@ -13,6 +14,11 @@ stage="${1:-all}"
 if [[ "$stage" == all || "$stage" == bench ]]; then
   rm -rf results/bench
   uv run python -m bench.executors
+  PYTHONPATH=. uv run python -m bench.e2e
+fi
+
+if [[ "$stage" == e2e ]]; then
+  rm -f results/bench/e2e.json
   PYTHONPATH=. uv run python -m bench.e2e
 fi
 

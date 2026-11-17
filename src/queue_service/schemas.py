@@ -78,6 +78,22 @@ AnyJob = IoSleepJob | CpuHashJob | FailJob | PoisonJob
 JobRequest = Annotated[AnyJob, Field(discriminator="type")]
 
 
+# Resource class of each job type. Each kind has its own stream and its own per-worker capacity
+# (bulkheads, DESIGN.md s8.1): CPU jobs wait in Redis for a free CPU process, not inside a
+# worker with their lease and timeout already running.
+CPU_JOB_TYPES = frozenset({"cpu_hash", "poison"})
+JobKind = Literal["io", "cpu"]
+JOB_KINDS: tuple[JobKind, ...] = ("io", "cpu")
+
+
+def job_kind(job_type: str) -> JobKind:
+    return "cpu" if job_type in CPU_JOB_TYPES else "io"
+
+
+def stream_for(base: str, job_type: str) -> str:
+    return f"{base}:{job_kind(job_type)}"
+
+
 class JobAccepted(BaseModel):
     job_id: UUID
     state: str

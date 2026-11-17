@@ -45,6 +45,9 @@ class Settings:
     dead_stream: str = "jobs:dead"
     max_in_flight: int = 32
     cpu_workers: int = os.cpu_count() or 2
+    # CPU jobs a worker takes at once (its CPU bulkhead). 0 = cpu_workers: a CPU job is only
+    # claimed when a CPU process is free, so its lease and timeout never run while it queues.
+    max_cpu_in_flight: int = 0
     # Lease = visibility timeout. Heartbeat every lease/3 keeps live jobs from being reclaimed.
     lease_s: float = 30.0
     job_timeout_s: float = 20.0

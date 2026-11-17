@@ -34,7 +34,7 @@ async def test_202_means_committed_and_dispatched(
     assert row["dispatched_at"] is not None
 
     redis = Redis.from_url(redis_url, decode_responses=True)
-    entries: list[Any] = await redis.xrange("jobs")  # type: ignore[assignment]
+    entries: list[Any] = await redis.xrange("jobs:io")  # type: ignore[assignment]
     await redis.aclose()
     assert [fields["job_id"] for _, fields in entries] == [job_id]
 
@@ -55,7 +55,7 @@ async def test_same_key_returns_same_job_and_dispatches_once(
     assert await _count(db) == 1
 
     redis = Redis.from_url(redis_url)
-    assert await redis.xlen("jobs") == 1
+    assert await redis.xlen("jobs:io") == 1
     await redis.aclose()
 
 
@@ -111,7 +111,7 @@ async def test_429_with_retry_after_when_over_limit_then_recovers(
     client, app = await make_client(max_depth=5, assumed_drain_per_s=1.0)
     redis = Redis.from_url(redis_url)
     for _ in range(10):  # simulate a backlog nobody is consuming
-        await redis.xadd("jobs", {"job_id": "x", "epoch": "1"})
+        await redis.xadd("jobs:io", {"job_id": "x", "epoch": "1"})
     await app.state.deps.sampler.sample_once()
 
     resp = await client.post("/jobs", json=IO_JOB)
@@ -119,7 +119,7 @@ async def test_429_with_retry_after_when_over_limit_then_recovers(
     assert resp.headers["Retry-After"] == "5"  # 5 over the limit at 1 job/s
     assert await _count(db) == 0  # rejected means not accepted, not half-written
 
-    await redis.delete("jobs")  # backlog drains
+    await redis.delete("jobs:io")  # backlog drains
     await app.state.deps.sampler.sample_once()
     assert (await client.post("/jobs", json=IO_JOB)).status_code == 202
     await redis.aclose()
@@ -192,7 +192,7 @@ async def test_429_is_decided_before_the_body_is_read_or_validated(
 ) -> None:
     client, app = await make_client(max_depth=0)
     redis = Redis.from_url(redis_url)
-    await redis.xadd("jobs", {"job_id": "x", "epoch": "1"})  # depth 1 > limit 0
+    await redis.xadd("jobs:io", {"job_id": "x", "epoch": "1"})  # depth 1 > limit 0
     await redis.aclose()
     await app.state.deps.sampler.sample_once()
     # Not even JSON. Inside the handler this would have been a 422 after full parsing; the
@@ -204,3 +204,29 @@ async def test_429_is_decided_before_the_body_is_read_or_validated(
     assert resp.headers["Retry-After"] == "1"
     assert resp.json()["detail"].startswith("queue depth")
     assert (await client.get("/healthz")).status_code == 200  # other routes untouched
+
+
+async def test_jobs_are_published_to_the_stream_of_their_kind(
+    make_client: MakeClient, redis_url: str
+) -> None:
+    client, _ = await make_client()
+    cpu = {"type": "cpu_hash", "schema_version": 1, "payload": {"iterations": 10}}
+    a = (await client.post("/jobs", json=IO_JOB)).json()["job_id"]
+    b = (await client.post("/jobs", json=cpu)).json()["job_id"]
+    redis = Redis.from_url(redis_url, decode_responses=True)
+    io_entries: list[Any] = await redis.xrange("jobs:io")  # type: ignore[assignment]
+    cpu_entries: list[Any] = await redis.xrange("jobs:cpu")  # type: ignore[assignment]
+    await redis.aclose()
+    assert [f["job_id"] for _, f in io_entries] == [a]
+    assert [f["job_id"] for _, f in cpu_entries] == [b]
+
+
+async def test_queue_depth_sums_both_streams(make_client: MakeClient, redis_url: str) -> None:
+    _, app = await make_client()
+    redis = Redis.from_url(redis_url)
+    await redis.xadd("jobs:io", {"job_id": "x", "epoch": "1"})
+    await redis.xadd("jobs:cpu", {"job_id": "y", "epoch": "1"})
+    await redis.xadd("jobs:cpu", {"job_id": "z", "epoch": "1"})
+    await redis.aclose()
+    await app.state.deps.sampler.sample_once()
+    assert app.state.deps.admission.depth == 3

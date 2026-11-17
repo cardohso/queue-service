@@ -42,6 +42,7 @@ class DispatchItem:
     job_id: UUID
     epoch: int
     entry_id: str | None  # None means "must publish"; otherwise publish only if entry is gone
+    type: str  # decides which stream (io or cpu) it is published to
 
 
 class Store(Protocol):
@@ -264,12 +265,12 @@ class PgStore:
                     dispatched_at = now(),
                     updated_at = now()
                 FROM c WHERE j.id = c.id
-                RETURNING j.id, j.epoch, j.stream_entry_id
+                RETURNING j.id, j.epoch, j.stream_entry_id, j.type
                 """,
                 limit,
                 grace_s,
             )
-        return [DispatchItem(r["id"], r["epoch"], r["stream_entry_id"]) for r in rows]
+        return [DispatchItem(r["id"], r["epoch"], r["stream_entry_id"], r["type"]) for r in rows]
 
     async def set_entry(self, job_id: UUID, epoch: int, entry_id: str) -> None:
         async with self._pool.acquire(timeout=self._timeout) as conn:

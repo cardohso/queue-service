@@ -31,6 +31,7 @@ from tests.failure.harness import Cluster, Infra, wait_until
 
 from bench.common import machine_info, percentile, save, settle
 from bench.executors import calibrate_cpu_iterations
+from queue_service.schemas import stream_for
 
 RUNS = int(os.environ.get("QS_BENCH_RUNS", "3"))
 WORKERS = (1, 2, 4)
@@ -64,7 +65,7 @@ async def preload(infra: Infra, kind: str, n: int, iterations: int) -> None:
     try:
         pipe = redis.pipeline(transaction=False)
         for r in rows:
-            pipe.xadd("jobs", {"job_id": str(r["id"]), "epoch": "1"})
+            pipe.xadd(stream_for("jobs", job_type), {"job_id": str(r["id"]), "epoch": "1"})
         await pipe.execute()
     finally:
         await redis.aclose()

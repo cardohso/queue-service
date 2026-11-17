@@ -59,7 +59,7 @@ async def test_worker_process_serves_ops_endpoints_logs_json_and_exits_cleanly_o
             accepted = await accept_job(
                 app.state.deps.pool, job, None, max_attempts=3, acquire_timeout_s=2
             )
-            await app.state.deps.publisher.publish(accepted.job_id, accepted.epoch)
+            await app.state.deps.publisher.publish(accepted.job_id, accepted.epoch, job.type)
 
             async def done() -> bool:
                 r = await client.get(f"/jobs/{accepted.job_id}")

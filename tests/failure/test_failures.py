@@ -31,6 +31,7 @@ from tests.failure.harness import (
     fail,
     io,
     poison,
+    stream_state,
     wait_until,
 )
 
@@ -474,10 +475,7 @@ async def test_flood_is_answered_with_429_not_errors_and_depth_stays_bounded(
         r = Redis.from_url(infra.redis_url, decode_responses=True)
         try:
             while not stop.is_set():
-                groups = await r.xinfo_groups("jobs")
-                for g in groups:
-                    if g["name"] == "workers":
-                        depths.append(int(g.get("lag") or 0) + int(g["pending"]))
+                depths.append((await stream_state(r))[2])
                 await asyncio.sleep(0.05)
         finally:
             await r.aclose()

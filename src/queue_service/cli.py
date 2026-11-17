@@ -21,6 +21,7 @@ from queue_service.db import (
 from queue_service.executor import Executor
 from queue_service.logs import configure_logging
 from queue_service.ops import Response, start_ops_server, text
+from queue_service.schemas import JOB_KINDS
 from queue_service.store import PgStore, replay_dead
 from queue_service.worker import Worker
 
@@ -56,7 +57,12 @@ async def run_worker(settings: Settings) -> None:
     worker = Worker(
         settings,
         PgStore(pool, settings.worker_db_acquire_timeout_s),
-        RedisBroker(redis, settings.stream, settings.group, settings.dead_stream),
+        {  # one stream per job kind: each with its own slot budget (DESIGN.md s8.1)
+            kind: RedisBroker(
+                redis, f"{settings.stream}:{kind}", settings.group, settings.dead_stream, kind
+            )
+            for kind in JOB_KINDS
+        },
         executor,
         worker_id=settings.worker_id or None,
     )

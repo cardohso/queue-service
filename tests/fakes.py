@@ -245,7 +245,7 @@ class FakeStore:
             if j.state == "retry_wait":
                 j.state, j.stream_entry_id, j.next_attempt_at = "queued", None, None
             j.dispatched_at = now
-        return [DispatchItem(j.id, j.epoch, j.stream_entry_id) for j in picked]
+        return [DispatchItem(j.id, j.epoch, j.stream_entry_id, j.type) for j in picked]
 
     async def set_entry(self, job_id: UUID, epoch: int, entry_id: str) -> None:
         self._check()
@@ -273,8 +273,9 @@ class _Group:
 class FakeBroker:
     """Redis Streams semantics that the worker relies on: consumer group, PEL, XAUTOCLAIM."""
 
-    def __init__(self, clock: FakeClock) -> None:
+    def __init__(self, clock: FakeClock, kind: str = "all") -> None:
         self.clock = clock
+        self.kind = kind
         self.stream: dict[int, tuple[UUID, int]] = {}  # entry seq -> (job_id, epoch)
         self.group: _Group | None = None
         self.dead: list[tuple[UUID, int, str]] = []
@@ -301,7 +302,7 @@ class FakeBroker:
 
     def _msg(self, seq: int) -> Message:
         job_id, epoch = self.stream[seq]
-        return Message(self._id(seq), job_id, epoch)
+        return Message(self._id(seq), job_id, epoch, self.kind)
 
     async def ping(self) -> None:
         self._check()

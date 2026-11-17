@@ -257,6 +257,28 @@ class ConnectionHog:
         self._held.clear()
 
 
+STREAMS = ("jobs:io", "jobs:cpu")  # one stream per job kind (DESIGN.md s8.1)
+
+
+async def stream_state(r: Redis) -> tuple[int, int, int]:
+    """(entries, pending, lag + pending) summed over the per-kind streams. A stream that does
+    not exist yet (no job of that kind was ever published) counts as empty."""
+    entries = pending = depth = 0
+    for stream in STREAMS:
+        entries += int(await r.xlen(stream))
+        try:
+            groups = await r.xinfo_groups(stream)
+        except RedisError as exc:
+            if "no such key" in str(exc).lower():
+                continue
+            raise
+        for g in groups:
+            if g["name"] == "workers":
+                pending += int(g["pending"])
+                depth += int(g.get("lag") or 0) + int(g["pending"])
+    return entries, pending, depth
+
+
 async def _ok(resp: Awaitable[httpx.Response]) -> bool:
     return (await resp).status_code == 200
 
@@ -487,9 +509,8 @@ class Cluster:
         r = Redis.from_url(self.infra.redis_url, decode_responses=True)
 
         async def drained() -> bool:
-            length = await r.xlen("jobs")
-            groups = await r.xinfo_groups("jobs")
-            return bool(length == 0 and sum(int(g["pending"]) for g in groups) == 0)
+            entries, pending, _ = await stream_state(r)
+            return entries == 0 and pending == 0
 
         try:
             await wait_until(drained, timeout_s, "stream drained (every delivery acked)", 0.2)
