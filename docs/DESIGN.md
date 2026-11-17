@@ -317,9 +317,18 @@ semaphore"; the code did not have one.
 **Fix: two streams, `jobs:io` and `jobs:cpu`.** The API and the dispatcher publish each job
 to the stream of its kind (`schemas.job_kind`). A worker runs one fetch loop per kind, and
 each loop reads only as many messages as its kind has free slots: `max_in_flight` for I/O,
-`max_cpu_in_flight` (default: one per CPU process) for CPU. A CPU job is therefore claimed
-only when a process is free to run it; the rest wait **unread in Redis**, with no lease or
-timeout running, where any idle worker can take them. CPU jobs can no longer use up the
+`max_cpu_in_flight` (default: two per CPU process) for CPU. A CPU job is therefore claimed
+only when a process is nearly free to run it; the rest wait **unread in Redis**, with no
+lease or timeout running, where any idle worker can take them.
+
+**Why two, not one (measured, `bench/cpu_slots.py`).** With exactly one slot per process the
+process idles during each job's claim and the previous job's commit: attempt latency became
+honest (p50 13 ms for a 10 ms job, from 314-386 ms) but one worker's throughput dropped from
+about 89 to 52 jobs/s. One running plus one "on deck" recovers most of it (72 jobs/s, p50 19
+ms); a third slot gets to 84 jobs/s at 27 ms; eight slots add no throughput and push p50 to
+75 ms. Two keeps in-worker waiting to about one job's duration. For very long CPU jobs, where
+the lease and timeout run during that wait, set `QS_MAX_CPU_IN_FLIGHT` to `cpu_workers`.
+The table is regenerated in RESULTS.md. CPU jobs can no longer use up the
 slots I/O jobs need. Admission control sums the depth of both streams.
 
 > Interview version: "That's the bulkhead pattern. Each resource class gets its own queue and

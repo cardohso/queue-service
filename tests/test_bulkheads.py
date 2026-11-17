@@ -55,7 +55,8 @@ class Rig:
         self.ex = Gated()
         self.worker = Worker(
             Settings(
-                max_in_flight=io_slots, cpu_workers=cpu_slots, block_ms=5,
+                max_in_flight=io_slots, cpu_workers=cpu_slots, max_cpu_in_flight=cpu_slots,
+                block_ms=5,
                 dispatch_interval_s=3600.0, reclaim_interval_s=3600.0, commit_retry_s=0.0,
             ),
             self.store, {"io": self.io, "cpu": self.cpu}, self.ex, worker_id="w1",
@@ -139,3 +140,21 @@ async def test_dispatcher_and_release_publish_to_the_jobs_own_stream() -> None:
     await rig.worker._release(claim, msg)
     assert [j for j, _ in rig.cpu.stream.values()] == [cpu_job]  # old acked, new one here
     assert [j for j, _ in rig.io.stream.values()] == [io_job]
+
+
+def test_default_cpu_budget_is_two_slots_per_cpu_process() -> None:
+    # One running, one on deck: measured to recover most of a process's throughput without
+    # turning the worker back into a long queue (DESIGN.md s8.1).
+    clock = FakeClock()
+    w = Worker(
+        Settings(cpu_workers=3, max_in_flight=32),
+        FakeStore(clock), {"io": FakeBroker(clock, "io"), "cpu": FakeBroker(clock, "cpu")},
+        Gated(), worker_id="w",
+    )  # fmt: skip
+    assert w._limits == {"io": 32, "cpu": 6}
+    w2 = Worker(
+        Settings(cpu_workers=3, max_cpu_in_flight=3),
+        FakeStore(clock), {"io": FakeBroker(clock, "io"), "cpu": FakeBroker(clock, "cpu")},
+        Gated(), worker_id="w",
+    )  # fmt: skip
+    assert w2._limits["cpu"] == 3  # explicit setting wins

@@ -194,14 +194,18 @@ def e2e_md(d: dict[str, Any], cpu_ms: float | None) -> str:
         )
         if kind == "cpu" and cpu_ms:
             p50 = statistics.median(r["p50_ms"] for r in g[(kind, p["workers"][0])])
-            out.append(
-                f"\nAttempt latency (p50 {p50:.0f} ms for a {cpu_ms:.0f} ms job) is mostly "
-                "**queueing inside the worker**: up to "
-                f"{p['max_in_flight_per_worker']} CPU jobs are in flight but each worker has "
-                f"{p['cpu_children_per_worker']} CPU child process, so they wait for it, and "
-                "the job timeout and lease clock run while they wait. This is a known design "
-                "gap (DESIGN.md promised a separate CPU limit); see README known limits."
-            )
+            if p50 < 2.5 * cpu_ms:
+                out.append(
+                    f"\nAttempt latency (p50 {p50:.0f} ms for a {cpu_ms:.0f} ms job) shows almost "
+                    "no queueing inside the worker: CPU jobs wait in Redis, in their own stream, "
+                    "and are claimed only when a CPU process is nearly free (DESIGN.md s8.1)."
+                )
+            else:
+                out.append(
+                    f"\nAttempt latency (p50 {p50:.0f} ms for a {cpu_ms:.0f} ms job) is mostly "
+                    "queueing inside the worker: more CPU jobs are claimed than CPU processes "
+                    "exist, and the job timeout and lease clock run while they wait."
+                )
         out.append("")
     return "\n".join(out)
 
@@ -223,6 +227,31 @@ def junit_outcomes(run_dirs: list[Path]) -> dict[str, list[str | None]]:
             msg = None if bad is None else (bad.get("message") or "failed").splitlines()[0][:160]
             out[tc.get("name", "?")].append(msg)
     return out
+
+
+def cpu_slots_md(d: dict[str, Any]) -> str:
+    p, rows = d["params"], d["results"]
+    g = group(rows, "slots")
+    out = [
+        "### CPU slots per worker\n",
+        "Source: `PYTHONPATH=. uv run python -m bench.cpu_slots` -> `results/bench/cpu_slots.json`. "
+        f"One worker, {p['cpu_children']} CPU process, {p['jobs']} CPU jobs per run, "
+        f"median of {p['runs']} runs [min-max]. `QS_MAX_CPU_IN_FLIGHT` = how many CPU jobs the "
+        "worker takes at once. Default is 2 per CPU process (one running, one on deck).\n",
+        "| CPU slots | throughput (jobs/s) | attempt latency p50 (ms) | p99 (ms) |",
+        "|---|---|---|---|",
+    ]
+    for slots in p["slots"]:
+        rs = g[(slots,)]
+        out.append(
+            f"| {slots} | {spread([r['throughput'] for r in rs], 1)} "
+            f"| {spread([r['p50_ms'] for r in rs], 1)} | {spread([r['p99_ms'] for r in rs], 1)} |"
+        )
+    out.append(
+        "\nToo few slots leave the CPU process idle during claim and commit round trips; "
+        "beyond a couple, extra slots add latency and no throughput.\n"
+    )
+    return "\n".join(out)
 
 
 def failures_md() -> str | None:
@@ -318,6 +347,9 @@ def main() -> None:
         cpu_ms = float(statistics.median(r["p50_ms"] for r in gx[("cpu", "processes", 1)]))
     if e2e:
         parts.append(e2e_md(e2e, cpu_ms))
+        slots = load(R / "bench/cpu_slots.json")
+        if slots:
+            parts.append(cpu_slots_md(slots))
     fm = failures_md()
     if fm:
         parts.append(fm)

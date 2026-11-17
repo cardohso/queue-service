@@ -48,8 +48,8 @@ class Worker:
 
     ``broker`` is either one Broker (single stream, ``max_in_flight`` slots) or a mapping
     ``{"io": ..., "cpu": ...}``: I/O jobs get ``max_in_flight`` slots and CPU jobs get
-    ``max_cpu_in_flight`` (default: one per CPU process), so a CPU job is only claimed when a
-    process is free to run it (DESIGN.md s8.1).
+    ``max_cpu_in_flight`` (default: two per CPU process: one running, one on deck), so a CPU
+    job is only claimed when a process is nearly free to run it (DESIGN.md s8.1).
     """
 
     def __init__(
@@ -73,7 +73,7 @@ class Worker:
             if ALL in self._brokers
             else {
                 "io": settings.max_in_flight,
-                "cpu": settings.max_cpu_in_flight or settings.cpu_workers,
+                "cpu": settings.max_cpu_in_flight or 2 * settings.cpu_workers,
             }
         )
         self._executor = executor
