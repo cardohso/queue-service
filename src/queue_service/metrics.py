@@ -124,6 +124,15 @@ class WorkerMetrics:
             buckets=_LAG_BUCKETS,
             registry=r,
         )
+        # A labelled counter that first appears by being incremented has no earlier sample, so
+        # Prometheus' increase()/rate() miss that first event, and an alert on the first
+        # dead-lettered job of a reason would never fire. Create the known series at zero.
+        for outcome in ("done", "retry", "dead", "released"):
+            self.jobs.labels(outcome)
+        for reason in ("permanent", "exhausted", "crashed_max_attempts"):
+            self.dead.labels(reason)
+        for kind in ("io", "cpu"):
+            self.in_flight.labels(kind)
 
     # Worker.stats names that map 1:1 onto a plain counter.
     def simple_counter(self, name: str) -> Counter | None:
@@ -166,6 +175,8 @@ class ApiMetrics:
         )
         self.queue_depth.labels("redis")  # materialise both series so dashboards never gap
         self.queue_depth.labels("postgres")
+        for code in ("409", "429", "503"):  # see WorkerMetrics: first event must be visible
+            self.rejected.labels(code)
         self.loop_lag = Histogram(
             "qs_event_loop_lag_seconds",
             "How late the event loop wakes a 100 ms sleep.",

@@ -188,14 +188,33 @@ end-to-end scaling are measured too: [RESULTS §2](docs/RESULTS.md).
   RESULTS.md are for comparing configurations, not a capacity claim.
 - **Local benchmarks only**, on a laptop that was not idle (load 6 to 10 of 8 cores); the report
   says so and spreads are wide for some cells. No free-threaded Python (`3.14t`) comparison.
-- **Failure tests simulate partitions** (pause, latency, kill), not a real network partition, and
-  have not run on Kubernetes yet. Phase 2 (Kubernetes, KEDA, Grafana) is not started.
+- **Failure tests simulate partitions** (pause, latency, kill), not a real network partition. They
+  run against Docker containers and processes; rerunning them inside the Kubernetes cluster is
+  the next step. KEDA keeps at least 1 worker (scale-to-zero would strand retries: the dispatcher
+  lives in the workers).
 - **Recovery after a crash costs about one job-duration per interrupted job** (suspects re-run one
   at a time; a deliberate trade for isolation).
 - **Demo settings** use a 5 s lease so recovery is visible; the default is 30 s
   ([lease trade-offs](docs/DESIGN.md#9-crash-recovery-and-the-visibility-timeout)).
 - **Not a product:** no auth, TLS or multi-tenancy; three demo job types plus a fault-injection
   type that is off by default (`QS_FAULT_INJECTION`).
+
+## Kubernetes
+
+A local 3-node [kind](https://kind.sigs.k8s.io/) cluster (Kubernetes v1.36), with probes, resource
+limits, `terminationGracePeriodSeconds` matched to the drain deadline, PodDisruptionBudgets, KEDA
+autoscaling on queue lag (1 to 6 workers), and Prometheus + Grafana with a committed dashboard and
+alerts. Needs Docker, `kind`, `kubectl` and `helm`:
+
+```bash
+./deploy/up.sh        # cluster + image + Postgres, Redis, API, workers
+./deploy/addons.sh    # KEDA, Prometheus, Grafana
+./deploy/smoke.sh && ./deploy/check_scaling.sh && ./deploy/check_monitoring.sh
+kubectl --context kind-qs -n qs port-forward svc/grafana 3000:3000   # dashboard at localhost:3000
+```
+
+CI runs exactly these on a runner. Design notes and measurements:
+[docs/DESIGN.md section 15](docs/DESIGN.md#15-kubernetes-phase-2-step-10).
 
 ## Develop
 

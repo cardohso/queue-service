@@ -1,0 +1,124 @@
+# A deliberately small Prometheus (no Operator, no Alertmanager): it discovers pods through the
+# `prometheus.io/*` annotations on the API and worker Deployments, evaluates the alert rules
+# and serves them on /api/v1/alerts. Alert *delivery* (Alertmanager) is out of scope.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: prometheus, namespace: qs}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: prometheus, namespace: qs}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: prometheus, namespace: qs}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: prometheus}
+subjects: [{kind: ServiceAccount, name: prometheus, namespace: qs}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus-config, namespace: qs}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+    rule_files: [/etc/prometheus/rules/*.yml]
+    scrape_configs:
+      - job_name: qs
+        kubernetes_sd_configs:
+          - {role: pod, namespaces: {names: [qs]}}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            target_label: app
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: prometheus-rules, namespace: qs}
+data:
+  qs.yml: |
+    groups:
+      - name: queue-service
+        rules:
+          - alert: DeadLettersGrowing
+            # Any job dead-lettered in the last 5 minutes: look at /api/v1/alerts or the
+            # dashboard for the reason label (permanent / exhausted / crashed_max_attempts).
+            expr: sum by (reason) (increase(qs_dead_letter_total[5m])) > 0
+            for: 10s
+            labels: {severity: warning}
+            annotations:
+              summary: "Jobs are being dead-lettered ({{ $labels.reason }})"
+          - alert: QueueBacklogHigh
+            # Backlog (lag + pending over both streams, as the API samples it) stays above 100 for
+            # 30 s. KEDA scales workers on the same lag, so this means "scaling is not catching up
+            # yet" (ramp-up takes ~30 s) or "already at maxReplicaCount".
+            expr: sum(qs_queue_depth) > 100
+            for: 30s
+            labels: {severity: warning}
+            annotations:
+              summary: "Queue backlog above 100 for 30 s: workers are not keeping up"
+          - alert: APIShedding
+            expr: sum(rate(qs_api_rejected_total{code=~"429|503"}[1m])) > 1
+            for: 30s
+            labels: {severity: info}
+            annotations:
+              summary: "The API is pushing back on producers (429/503)"
+          - alert: WorkerEventLoopBlocked
+            expr: histogram_quantile(0.99, sum by (le) (rate(qs_event_loop_lag_seconds_bucket{app="worker"}[1m]))) > 0.25
+            for: 30s
+            labels: {severity: warning}
+            annotations:
+              summary: "A worker event loop is stalling (p99 lag > 250 ms): CPU work on the loop?"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: prometheus, namespace: qs}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: prometheus}
+  template:
+    metadata:
+      labels: {app: prometheus}
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.5.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=2h
+            - --web.enable-lifecycle
+          ports: [{name: web, containerPort: 9090}]
+          readinessProbe:
+            httpGet: {path: /-/ready, port: web}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml}
+            - {name: rules, mountPath: /etc/prometheus/rules}
+          resources:
+            requests: {cpu: 100m, memory: 200Mi}
+            limits: {cpu: "1", memory: 512Mi}
+      volumes:
+        - {name: config, configMap: {name: prometheus-config}}
+        - {name: rules, configMap: {name: prometheus-rules}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: prometheus, namespace: qs}
+spec:
+  selector: {app: prometheus}
+  ports: [{name: web, port: 9090, targetPort: web}]

@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: qs
+spec:
+  replicas: 2   # KEDA owns the replica count once keda/scaledobject.yaml is applied
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      # SIGTERM -> stop pulling, finish or release in-flight jobs within QS_DRAIN_DEADLINE_S
+      # (25 s by default), then exit. The grace period is that deadline plus a margin: if it
+      # were shorter, Kubernetes would SIGKILL a worker that is still releasing jobs (safe,
+      # because the lease recovers them, but slower). docs/DESIGN.md section 10.
+      terminationGracePeriodSeconds: 35
+      containers:
+        - name: worker
+          image: queue-service:dev
+          imagePullPolicy: IfNotPresent
+          args: ["worker"]
+          env:
+            # Order matters: $(VAR) below only expands variables defined ABOVE it.
+            - name: QS_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: qs-db, key: password}}
+            - name: QS_DATABASE_URL
+              value: postgresql://qs:$(QS_DB_PASSWORD)@postgres:5432/qs
+            - {name: QS_REDIS_URL, value: "redis://redis:6379/0"}
+            - {name: QS_LOG_JSON, value: "1"}
+            - {name: QS_OPS_HOST, value: "0.0.0.0"}
+            # Drain deadline vs job timeout: while job_timeout (20 s) < drain_deadline (25 s) a
+            # job in flight always finishes or times out before the deadline, so shutdown never
+            # has to *release* anything. Raise the timeout above the deadline and it does (tested
+            # in the cluster: pod gone in 29.8 s, every in-flight job released and re-run).
+            - {name: QS_DRAIN_DEADLINE_S, value: "25"}
+            - {name: QS_JOB_TIMEOUT_S, value: "20"}
+            # Match the CPU limit: 2 CPU processes (default would be the node's core count).
+            - {name: QS_CPU_WORKERS, value: "2"}
+            - name: QS_WORKER_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+          ports: [{name: ops, containerPort: 9100}]
+          # Readiness = Postgres and Redis reachable and not draining; liveness = event loop turning.
+          readinessProbe:
+            httpGet: {path: /readyz, port: ops}
+            periodSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: ops}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet: {path: /readyz, port: ops}
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 200m, memory: 192Mi}
+            limits: {cpu: "2", memory: 512Mi}

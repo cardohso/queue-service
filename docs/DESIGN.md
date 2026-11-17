@@ -404,7 +404,15 @@ is the isolation cost of section 9.1 (8 suspects x 0.3 s, run one at a time).
    `attempts` is the fencing token and must never go backwards (a reused token can let a
    stale write through). So the budget is refunded instead.
    Crash between `XADD` and `XACK` → duplicate delivery, harmless.
-4. Close pools, exit 0. Phase 2: `terminationGracePeriodSeconds = drain_deadline + 5`.
+4. Close pools, exit 0. Phase 2: `terminationGracePeriodSeconds = drain_deadline + 10` (35 s).
+
+*Checked in the cluster (step 10).* SIGTERM reaches the worker as PID 1 and is handled. With
+`job_timeout` raised above the deadline and 6 jobs of 60 s in flight, `kubectl delete pod`
+returned after 29.8 s (25 s drain + release, inside the 35 s grace); all 6 attempts were recorded
+`released` with their budget refunded, and the other worker took them over. Note the relation
+between two settings: while `job_timeout` (20 s) is below `drain_deadline` (25 s), an in-flight
+job always finishes or times out before the deadline, so shutdown never needs to release
+anything; the release path only matters for jobs allowed to run longer than the deadline.
 
 A `kill -9` skips all of this; that path is covered by §9.
 
@@ -531,3 +539,49 @@ run, see RESULTS.md); `pebble` for the CPU process pool;
 FastAPI, pydantic v2, `redis-py` asyncio, `asyncpg`, `prometheus-client`, `structlog`;
 uv, ruff, mypy (strict), pytest, pytest-asyncio, Hypothesis, testcontainers, toxiproxy;
 Docker Compose; GitHub Actions; gitleaks for secret scan.
+
+## 15. Kubernetes (phase 2, step 10)
+
+Everything is under `deploy/`: `up.sh` (kind cluster, image, base manifests), `addons.sh` (KEDA,
+Prometheus, Grafana), `smoke.sh`, `check_scaling.sh`, `check_monitoring.sh`. CI runs all of them
+on a runner (job `kubernetes`). Decisions and what each one cost:
+
+- **Cluster:** kind, 1 control plane + 2 workers (two nodes make a PodDisruptionBudget and
+  `kubectl drain` meaningful). The node image is **pinned by digest to Kubernetes v1.36.4**:
+  kind's default had moved to v1.37, outside KEDA 2.21's tested range (v1.34-v1.36).
+- **Probes** reuse the endpoints from step 6. Liveness = event loop turning (never a dependency:
+  restarting a pod does not fix Postgres). Readiness = can do useful work (API: Postgres; worker:
+  Postgres and Redis, not draining). Startup probes give a slow start 2 minutes before liveness
+  starts counting.
+- **Shutdown:** `terminationGracePeriodSeconds: 35` = drain deadline 25 s + margin; API gets a 5 s
+  `preStop` sleep so the Service stops routing before uvicorn drains. Measured: `kubectl delete pod`
+  on a worker holding six 60 s jobs finished in 29.8 s with every job released and re-run
+  (section 10 has the detail and the `job_timeout` vs `drain_deadline` relation).
+- **PodDisruptionBudgets:** API `minAvailable: 1`, workers `maxUnavailable: 1`.
+- **Resources:** small requests so the whole stack, KEDA and monitoring fit a 7.7 GiB Docker VM
+  (the three kind nodes used about 2.8 GiB with everything running). Worker CPU children are set
+  to 2 (`QS_CPU_WORKERS`) to match its CPU limit, not the node's core count.
+- **Autoscaling:** KEDA `redis-streams` scaler in **lag mode** (needs Redis 7+; we run 8), one
+  trigger per stream, `lagCount` is the target backlog per replica. Measured on the cluster:
+  a 923-job backlog took the workers from 1 to 6 in about 30 s, 1500/1500 jobs completed with
+  no duplicates, and scale-down took about 3.5 minutes (one pod per 30 s).
+  **`minReplicaCount` is 1, not 0, on purpose:** the dispatcher (due retries, re-publishing after
+  a Redis wipe) runs inside the workers. At zero workers a job in `retry_wait` would be stranded
+  and the lag metric cannot see it. Scale-to-zero needs the dispatcher moved into an always-on
+  component first (not done).
+- **Monitoring:** a small Prometheus (pod discovery by annotation, alert rules, no Alertmanager)
+  and Grafana with the committed dashboard (`deploy/k8s/monitoring/dashboards/`). Alerts:
+  `DeadLettersGrowing`, `QueueBacklogHigh`, `APIShedding`, `WorkerEventLoopBlocked`.
+  `check_monitoring.sh` proves, under a workload that produces every event type, that all pods
+  are scraped, **every dashboard panel returns data**, and the first two alerts really go
+  pending -> firing. Alert delivery (Alertmanager, paging) is not set up.
+
+Two traps this step hit, both now covered by a test or a comment:
+
+1. **Kubernetes `$(VAR)` expansion only sees variables defined earlier in the `env` list.** The
+   database URL was listed before the password variable, so the literal text `$(QS_DB_PASSWORD)`
+   reached the application (`password authentication failed`).
+2. **A labelled Prometheus counter created by its first increment has no earlier sample**, so
+   `increase()` misses that first event and `DeadLettersGrowing` would not have fired for the
+   first dead-lettered job of each reason. The known label values are now created at zero
+   (`tests/test_worker_metrics.py`).

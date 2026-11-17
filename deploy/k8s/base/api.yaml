@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: qs
+spec:
+  selector: {app: api}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: qs
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}  # never drop below the serving capacity
+  selector:
+    matchLabels: {app: api}
+  template:
+    metadata:
+      labels: {app: api}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      # preStop sleep (5 s) + uvicorn's graceful shutdown must fit: the Service stops sending
+      # new requests during the sleep, then in-flight requests finish before SIGTERM.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: queue-service:dev
+          imagePullPolicy: IfNotPresent
+          args: ["api"]
+          env:
+            # Order matters: $(VAR) below only expands variables defined ABOVE it.
+            - name: QS_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: qs-db, key: password}}
+            - name: QS_DATABASE_URL
+              value: postgresql://qs:$(QS_DB_PASSWORD)@postgres:5432/qs
+            - {name: QS_REDIS_URL, value: "redis://redis:6379/0"}
+            - {name: QS_LOG_JSON, value: "1"}
+            - {name: QS_API_HOST, value: "0.0.0.0"}
+          ports: [{name: http, containerPort: 8000}]
+          lifecycle:
+            preStop:
+              exec: {command: ["python", "-c", "import time; time.sleep(5)"]}
+          # Liveness fails only if the event loop is stuck; readiness needs Postgres. Redis is
+          # reported but does not gate readiness (the API accepts while Redis is down).
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 384Mi}

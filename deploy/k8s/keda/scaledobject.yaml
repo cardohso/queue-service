@@ -1,0 +1,50 @@
+# Autoscale workers on queue lag (KEDA `redis-streams` scaler, lag mode, Redis 7+).
+#
+# - Two triggers, one per stream (jobs:io, jobs:cpu): the HPA scales to the largest of them.
+# - `lagCount` is the target backlog *per replica*: at lag 100 with lagCount 20 -> 5 workers.
+# - Lag mode counts entries not yet delivered to the group; entries being processed (pending)
+#   are deliberately not counted: the backlog is what needs more workers.
+# - minReplicaCount is 1, NOT 0, on purpose. The dispatcher (due retries, lost dispatches after
+#   a Redis wipe) runs inside the workers. With zero workers a job in `retry_wait` would be
+#   stranded and the lag metric could not see it. Scale-to-zero would need the dispatcher moved
+#   into an always-on component first (documented in docs/DESIGN.md section 8.2).
+# - Scale-down is slow (stabilisation window) so a short lull does not kill workers mid-burst;
+#   termination is graceful anyway (terminationGracePeriodSeconds 35 > drain deadline 25).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+  namespace: qs
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: 1
+  maxReplicaCount: 6
+  pollingInterval: 5
+  # (cooldownPeriod only applies to scale-to-zero, which is off: see the comment above.)
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            - {type: Pods, value: 1, periodSeconds: 30}
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - {type: Pods, value: 4, periodSeconds: 15}
+  triggers:
+    - type: redis-streams
+      metadata:
+        address: redis.qs.svc.cluster.local:6379
+        stream: jobs:io
+        consumerGroup: workers
+        lagCount: "40"
+        activationLagCount: "5"
+    - type: redis-streams
+      metadata:
+        address: redis.qs.svc.cluster.local:6379
+        stream: jobs:cpu
+        consumerGroup: workers
+        lagCount: "10"
+        activationLagCount: "2"

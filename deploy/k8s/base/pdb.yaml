@@ -1,0 +1,20 @@
+# Voluntary disruptions (kubectl drain, node upgrades) may take down at most one at a time.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  namespace: qs
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app: api}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker
+  namespace: qs
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: worker}

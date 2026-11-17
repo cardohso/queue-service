@@ -1,0 +1,56 @@
+# Postgres: the source of truth. One replica with a persistent volume (kind's default
+# StorageClass). No HA: that is a stated limit of the project (README, DESIGN s13).
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: qs
+spec:
+  clusterIP: None
+  selector: {app: postgres}
+  ports: [{name: pg, port: 5432}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: qs
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres}
+  template:
+    metadata:
+      labels: {app: postgres}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - {name: POSTGRES_USER, value: qs}
+            - {name: POSTGRES_DB, value: qs}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: qs-db, key: password}}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports: [{name: pg, containerPort: 5432}]
+          readinessProbe:
+            exec: {command: ["pg_isready", "-U", "qs", "-d", "qs"]}
+            periodSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            exec: {command: ["pg_isready", "-U", "qs", "-d", "qs"]}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}

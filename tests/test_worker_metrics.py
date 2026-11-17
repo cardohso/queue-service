@@ -193,3 +193,14 @@ async def test_alive_goes_false_when_the_event_loop_tick_is_stale() -> None:
 async def test_loop_lag_histogram_is_registered(name: str) -> None:
     rig = Rig()
     assert rig.registry.get_sample_value(name) == 0.0
+
+
+def test_known_labelled_series_exist_at_zero_so_the_first_event_is_visible_to_rate() -> None:
+    # A counter created by its first increment has no earlier sample, so Prometheus increase()
+    # misses that event and the "dead letters growing" alert would not fire for the first one.
+    reg = CollectorRegistry()
+    WorkerMetrics(reg)
+    for reason in ("permanent", "exhausted", "crashed_max_attempts"):
+        assert reg.get_sample_value("qs_dead_letter_total", {"reason": reason}) == 0.0
+    for outcome in ("done", "retry", "dead", "released"):
+        assert reg.get_sample_value("qs_jobs_total", {"outcome": outcome}) == 0.0
