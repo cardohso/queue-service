@@ -189,9 +189,9 @@ end-to-end scaling are measured too: [RESULTS §2](docs/RESULTS.md).
 - **Local benchmarks only**, on a laptop that was not idle (load 6 to 10 of 8 cores); the report
   says so and spreads are wide for some cells. No free-threaded Python (`3.14t`) comparison.
 - **Failure tests simulate partitions** (pause, latency, kill), not a real network partition. They
-  run against Docker containers and processes; rerunning them inside the Kubernetes cluster is
-  the next step. KEDA keeps at least 1 worker (scale-to-zero would strand retries: the dispatcher
-  lives in the workers).
+  run against Docker containers and processes, and again inside the kind cluster (pod kills,
+  scale to zero, rolling update, node drain). KEDA keeps at least 1 worker (scale-to-zero would
+  strand retries: the dispatcher lives in the workers).
 - **Recovery after a crash costs about one job-duration per interrupted job** (suspects re-run one
   at a time; a deliberate trade for isolation).
 - **Demo settings** use a 5 s lease so recovery is visible; the default is 30 s
@@ -210,11 +210,20 @@ alerts. Needs Docker, `kind`, `kubectl` and `helm`:
 ./deploy/up.sh        # cluster + image + Postgres, Redis, API, workers
 ./deploy/addons.sh    # KEDA, Prometheus, Grafana
 ./deploy/smoke.sh && ./deploy/check_scaling.sh && ./deploy/check_monitoring.sh
+./deploy/chaos.py all # failure tests in the cluster (about 20 minutes)
 kubectl --context kind-qs -n qs port-forward svc/grafana 3000:3000   # dashboard at localhost:3000
 ```
 
+**Failure tests in the cluster.** `chaos.py` loads the system from a pod inside the cluster and
+then breaks something. It force-deletes and `kill -9`s workers, deletes the API, Redis and
+Postgres pods, scales the workers to zero, rolls out a new version, and drains a node. Every
+scenario held the invariant: 0 lost, 0 not final, 0 duplicate results across 12,500 accepted
+jobs. The drain test is mutation-checked: with the PodDisruptionBudgets deleted it fails (0 API
+pods ready).
+
 CI runs exactly these on a runner. Design notes and measurements:
-[docs/DESIGN.md section 15](docs/DESIGN.md#15-kubernetes-phase-2-step-10).
+[docs/DESIGN.md section 15](docs/DESIGN.md#15-kubernetes-phase-2-step-10) and
+[section 16](docs/DESIGN.md#16-failure-tests-in-the-cluster-phase-2-step-11).
 
 ## Develop
 

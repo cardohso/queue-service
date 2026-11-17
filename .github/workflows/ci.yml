@@ -91,3 +91,37 @@ jobs:
           kubectl --context kind-qs -n qs logs -l app=worker --tail=50 --all-containers || true
           kubectl --context kind-qs -n qs logs -l app=api --tail=50 || true
           kubectl --context kind-qs -n keda get pods || true
+
+  kubernetes-chaos:
+    # The failure tests again, inside a kind cluster: pod kills (workers, API, Redis, Postgres),
+    # KEDA paused at zero workers, a rolling update and rollback, a node drain against the PDBs.
+    runs-on: ubuntu-latest
+    needs: lint-type-unit
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+          version: v0.33.0
+      - run: ./deploy/up.sh
+      - run: ./deploy/addons.sh
+      - name: Failure tests in the cluster; invariant holds in every scenario
+        run: ./deploy/chaos.py all
+      - name: PDB mutation check (must FAIL without the PodDisruptionBudgets)
+        run: |
+          if ./deploy/chaos.py drain --no-pdb; then
+            echo "the drain test passed without PDBs: it does not test the PDB"; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chaos-results
+          path: results/k8s/
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          kubectl --context kind-qs get nodes,pods -A -o wide || true
+          kubectl --context kind-qs -n qs get events --sort-by=.lastTimestamp | tail -60 || true
+          kubectl --context kind-qs -n qs logs -l app=worker --tail=50 --all-containers || true
+          kubectl --context kind-qs -n qs logs -l app=api --tail=50 || true

@@ -585,3 +585,51 @@ Two traps this step hit, both now covered by a test or a comment:
    `increase()` misses that first event and `DeadLettersGrowing` would not have fired for the
    first dead-lettered job of each reason. The known label values are now created at zero
    (`tests/test_worker_metrics.py`).
+
+## 16. Failure tests in the cluster (phase 2, step 11)
+
+`deploy/chaos.py kill|zero|rollout|drain|all` reruns the failure tests inside the kind cluster.
+CI runs `all` (job `kubernetes-chaos`). Every scenario works the same way:
+
+- **The load runs inside the cluster.** A pod on the control-plane node (`deploy/chaos/loadgen.py`,
+  standard library only, so it runs in the app image) submits 25 jobs/s, open loop, through the
+  `api` Service. A host client behind `kubectl port-forward` would be pinned to one API pod and
+  would die with it, so it would measure the tunnel rather than the Service.
+- **The job mix** is 80% I/O, 10% CPU, 5% transient failures that retry twice, and 5% permanent
+  failures that must dead-letter.
+- **Retries:** each job is retried with the **same Idempotency-Key** until it is accepted, so a
+  retry after a timeout can never create a second job.
+- **The check, against Postgres:** every accepted job is in exactly one final state, every job ID
+  the client got a 202 for exists, and `done` holds exactly when there is one result row. Each
+  permanent-failure job must also be dead.
+
+Results from one local run per scenario (raw files in `results/k8s/*.json`; every scenario held):
+
+| Scenario | What breaks | Accepted | Lost / not final / duplicate results | Extra executions | Client saw |
+|---|---|---|---|---|---|
+| `kill` | worker force-deleted, worker deleted gracefully, worker process `kill -9` (container restart), API pod, Redis pod (all streams lost), Postgres pod, every worker at once | 2750 | 0 / 0 / 0 | +294 (18 attempts cut off) | 433 x 503 while Postgres restarted (about 6 s), 8 connection errors, 0 gave up |
+| `zero` | KEDA paused at 0 workers for 35 s under load: no worker pod, not even a draining one | 3000 | 0 / 0 / 0 | +300 (the planned retries) | 88 x 429 (back-pressure), 0 errors |
+| `rollout` | new image rolled out to API and workers mid-load, then rolled back | 3750 | 0 / 0 / 0 | +376 (planned retries) | 0 errors |
+| `drain` | every API and worker pod packed onto one node, then `kubectl drain` of it | 3000 | 0 / 0 / 0 | +300 (planned retries) | 0 errors; at least 1 API pod ready throughout; the API PDB refused 1 eviction |
+
+Details worth knowing:
+
+- **The PDB test is mutation-checked.** `chaos.py drain --no-pdb` deletes the budgets first. The
+  drain then evicts every API pod at once (fewest ready: **0**) and the scenario **fails**, as it
+  should (`results/k8s/drain-no-pdb.json`). The setup packs the pods onto
+  one node on purpose: if they were spread out, a drain would pass even without a PDB, and the
+  test would prove nothing.
+- **Scale to zero is survivable, not a supported mode.** While the workers were at zero, 883 jobs
+  queued and 5 retries came due with no dispatcher running. All of them finished once a worker
+  came back, 5.2 s after KEDA resumed. In this test *I* resumed KEDA. With `minReplicaCount: 0`
+  and no new traffic, the lag metric cannot see `retry_wait` jobs, so nothing would ever bring a
+  worker back. That is why the minimum stays at 1 (section 15).
+- **A bug in my own first version of this test:** it counted only non-terminating pods, so
+  "zero workers" was reported while workers were still draining and running jobs. It now waits
+  until no worker pod exists at all.
+- **The rollout is the same code under a new tag.** It tests the rollout mechanics: old and new
+  pods side by side, graceful replacement, `rollout undo`. It does not test skew between versions
+  with incompatible schemas.
+- **Not covered:** draining the Postgres node. Postgres here is a single replica on node-local
+  storage, so draining its node is a database outage by construction. A production deployment
+  would use a replicated or managed Postgres. The `kill` scenario covers a Postgres restart.
