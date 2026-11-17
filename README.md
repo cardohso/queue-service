@@ -68,8 +68,8 @@ curl -s localhost:8000/metrics | grep qs_   # Prometheus metrics; also /healthz 
 ```mermaid
 flowchart LR
   client([Client]) -- "POST /jobs<br/>Idempotency-Key" --> api["Ingest API"]
-  api -- "1. INSERT (commit), then 202" --> pg[("Postgres<br/>source of truth:<br/>jobs, attempts, results")]
-  api -. "2. XADD (best effort)" .-> redis
+  api -- "(1) INSERT, commit, then 202" --> pg[("Postgres<br/>source of truth:<br/>jobs, attempts, results")]
+  api -. "(2) XADD, best effort" .-> redis
   subgraph redis["Redis Streams (rebuildable)"]
     sio["jobs:io"]
     scpu["jobs:cpu"]

@@ -59,8 +59,8 @@ dispatch channel.
 ```mermaid
 flowchart LR
   C[Client] -->|POST /jobs + Idempotency-Key| API[FastAPI ingest]
-  API -->|1. INSERT job, state=queued| PG[(Postgres: jobs, attempts, results)]
-  API -->|2. XADD to the job's stream| RS[(Redis Streams: jobs:io, jobs:cpu, jobs:dead)]
+  API -->|"(1) INSERT job, state=queued"| PG[(Postgres: jobs, attempts, results)]
+  API -->|"(2) XADD to the job's stream"| RS[(Redis Streams: jobs:io, jobs:cpu, jobs:dead)]
   API -. samples lag + pending of both streams .-> RS
   RS -->|XREADGROUP / XAUTOCLAIM, one loop per kind| W[Worker: asyncio loop]
   W -->|claim / heartbeat / fenced commit| PG
