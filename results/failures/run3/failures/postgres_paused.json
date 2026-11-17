@@ -3,15 +3,15 @@
   "jobs": 300,
   "done": 300,
   "dead": 0,
-  "executions": 303,
-  "extra_executions": 3,
-  "interrupted": 3,
+  "executions": 305,
+  "extra_executions": 5,
+  "interrupted": 5,
   "dead_reasons": {},
-  "recovery_s": 0.067856,
+  "recovery_s": 0.074647,
   "notes": {
     "client": {
       "202": 300,
-      "transport_error": 1
+      "transport_error": 8
     },
     "outage_s": 5.0,
     "worker_A_commit_gave_up": 2.0,

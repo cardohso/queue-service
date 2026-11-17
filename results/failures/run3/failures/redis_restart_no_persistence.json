@@ -7,13 +7,13 @@
   "extra_executions": 0,
   "interrupted": 0,
   "dead_reasons": {},
-  "recovery_s": 0.154695,
+  "recovery_s": 0.194355,
   "notes": {
     "client": {
       "202": 400
     },
     "redis_persistence": false,
-    "redis_down_s": 0.27,
-    "fault_at": "2026-11-16 14:57:30.049537+00:00"
+    "redis_down_s": 0.3,
+    "fault_at": "2026-11-17 11:23:42.344467+00:00"
   }
 }

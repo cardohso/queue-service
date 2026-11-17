@@ -1,0 +1,200 @@
+{
+  "machine": {
+    "os": "Darwin 27.2.0",
+    "machine": "arm64",
+    "python": "3.14.8",
+    "python_impl": "CPython",
+    "gil_enabled": true,
+    "cpu": "Apple M1 Pro",
+    "logical_cpus": 8,
+    "performance_cores": 6,
+    "efficiency_cores": 2,
+    "memory_gb": 16,
+    "macos": "27.2.1"
+  },
+  "load_avg_at_start": [
+    6.4052734375,
+    8.9716796875,
+    10.3486328125
+  ],
+  "params": {
+    "jobs": 600,
+    "runs": 3,
+    "slots": [
+      1,
+      2,
+      3,
+      4,
+      8
+    ],
+    "cpu_job_iterations": 31453,
+    "cpu_children": 1
+  },
+  "results": [
+    {
+      "slots": 1,
+      "run": 1,
+      "jobs": 600,
+      "elapsed_s": 12.392969,
+      "throughput": 48.4145486041319,
+      "p50_ms": 13.418,
+      "p95_ms": 15.647999999999998,
+      "p99_ms": 24.133000000000003,
+      "extra_executions": 0
+    },
+    {
+      "slots": 1,
+      "run": 2,
+      "jobs": 600,
+      "elapsed_s": 11.262233,
+      "throughput": 53.275402844178416,
+      "p50_ms": 13.166,
+      "p95_ms": 14.876999999999999,
+      "p99_ms": 16.729999999999997,
+      "extra_executions": 0
+    },
+    {
+      "slots": 1,
+      "run": 3,
+      "jobs": 600,
+      "elapsed_s": 11.479296,
+      "throughput": 52.26801364822372,
+      "p50_ms": 13.312,
+      "p95_ms": 15.59,
+      "p99_ms": 18.707,
+      "extra_executions": 0
+    },
+    {
+      "slots": 2,
+      "run": 1,
+      "jobs": 600,
+      "elapsed_s": 8.363366,
+      "throughput": 71.74144955511932,
+      "p50_ms": 18.208,
+      "p95_ms": 25.922,
+      "p99_ms": 43.213,
+      "extra_executions": 0
+    },
+    {
+      "slots": 2,
+      "run": 2,
+      "jobs": 600,
+      "elapsed_s": 7.809011,
+      "throughput": 76.83431358977468,
+      "p50_ms": 18.3,
+      "p95_ms": 27.427,
+      "p99_ms": 40.800000000000004,
+      "extra_executions": 0
+    },
+    {
+      "slots": 2,
+      "run": 3,
+      "jobs": 600,
+      "elapsed_s": 7.007764,
+      "throughput": 85.6193216552384,
+      "p50_ms": 18.044,
+      "p95_ms": 22.689999999999998,
+      "p99_ms": 26.732,
+      "extra_executions": 0
+    },
+    {
+      "slots": 3,
+      "run": 1,
+      "jobs": 600,
+      "elapsed_s": 7.708112,
+      "throughput": 77.84007289982294,
+      "p50_ms": 29.319000000000003,
+      "p95_ms": 35.145,
+      "p99_ms": 40.757000000000005,
+      "extra_executions": 0
+    },
+    {
+      "slots": 3,
+      "run": 2,
+      "jobs": 600,
+      "elapsed_s": 6.855776,
+      "throughput": 87.51744514406539,
+      "p50_ms": 29.160999999999998,
+      "p95_ms": 35.004,
+      "p99_ms": 46.072,
+      "extra_executions": 0
+    },
+    {
+      "slots": 3,
+      "run": 3,
+      "jobs": 600,
+      "elapsed_s": 6.937594,
+      "throughput": 86.48531464943034,
+      "p50_ms": 29.604,
+      "p95_ms": 35.213,
+      "p99_ms": 39.794999999999995,
+      "extra_executions": 0
+    },
+    {
+      "slots": 4,
+      "run": 1,
+      "jobs": 600,
+      "elapsed_s": 7.947048,
+      "throughput": 75.49973273094614,
+      "p50_ms": 40.099000000000004,
+      "p95_ms": 53.087,
+      "p99_ms": 81.994,
+      "extra_executions": 0
+    },
+    {
+      "slots": 4,
+      "run": 2,
+      "jobs": 600,
+      "elapsed_s": 6.890332,
+      "throughput": 87.07853264545163,
+      "p50_ms": 39.283,
+      "p95_ms": 46.803,
+      "p99_ms": 60.359,
+      "extra_executions": 0
+    },
+    {
+      "slots": 4,
+      "run": 3,
+      "jobs": 600,
+      "elapsed_s": 7.338257,
+      "throughput": 81.76328520519246,
+      "p50_ms": 40.711,
+      "p95_ms": 51.674,
+      "p99_ms": 80.189,
+      "extra_executions": 0
+    },
+    {
+      "slots": 8,
+      "run": 1,
+      "jobs": 600,
+      "elapsed_s": 7.640081,
+      "throughput": 78.53319879723787,
+      "p50_ms": 82.243,
+      "p95_ms": 95.47,
+      "p99_ms": 911.729,
+      "extra_executions": 0
+    },
+    {
+      "slots": 8,
+      "run": 2,
+      "jobs": 600,
+      "elapsed_s": 6.496408,
+      "throughput": 92.35873116343679,
+      "p50_ms": 81.438,
+      "p95_ms": 87.70100000000001,
+      "p99_ms": 91.09299999999999,
+      "extra_executions": 0
+    },
+    {
+      "slots": 8,
+      "run": 3,
+      "jobs": 600,
+      "elapsed_s": 8.009533,
+      "throughput": 74.9107344960062,
+      "p50_ms": 89.436,
+      "p95_ms": 137.131,
+      "p99_ms": 298.272,
+      "extra_executions": 0
+    }
+  ]
+}

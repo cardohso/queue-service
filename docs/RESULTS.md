@@ -63,30 +63,44 @@ Source: `uv run python -m bench.e2e` -> `results/bench/e2e.json`. Real Postgres 
 - Memory: 16 GB
 - OS: Darwin 27.2.0 (macOS 27.2.1)
 - Python: CPython 3.14.8, GIL enabled
-- Machine load average at start (1/5/15 min): 9.5 / 6.9 / 6.6 on 8 cores
+- Machine load average at start (1/5/15 min): 10.1 / 11.5 / 11.4 on 8 cores
 - **Not a quiet machine:** the benchmark waits up to 150 s for the 1-minute load to fall under 4.8 and this run never got there (other applications were using several cores). Parallel-scaling numbers are therefore pessimistic and the spreads wider than on an idle box. Rerun with `scripts/run_benchmarks.sh bench` after closing heavy applications.
 
 ### I/O jobs (50 ms wait), 2000 jobs per run
 
 | workers | throughput (jobs/s) | attempt latency p50 (ms) | p95 (ms) | p99 (ms) | extra executions |
 |---|---|---|---|---|---|
-| 1 | 324.1 [322.2-422.0] | 61.5 [58.5-62.7] | 103.6 [72.1-118.6] | 168.8 [84.8-417.7] | 0 [0-0] |
-| 2 | 394.3 [388.5-660.6] | 86.1 [68.2-92.9] | 170.9 [89.6-190.9] | 243.3 [100.4-258.7] | 0 [0-0] |
-| 4 | 669.5 [631.9-684.0] | 109.2 [108.3-113.2] | 160.9 [150.8-161.9] | 188.6 [187.4-191.5] | 0 [0-0] |
+| 1 | 498.4 [428.2-504.6] | 54.8 [54.8-55.2] | 60.3 [59.5-62.6] | 68.6 [65.1-281.6] | 0 [0-0] |
+| 2 | 840.9 [803.8-857.9] | 59.5 [59.2-60.3] | 69.1 [66.4-73.4] | 74.9 [72.5-79.7] | 0 [0-0] |
+| 4 | 519.2 [490.0-621.8] | 125.5 [108.6-134.0] | 208.7 [202.4-229.2] | 276.3 [260.4-411.6] | 0 [0-0] |
 
-Scaling: 4 workers deliver 2.07x the throughput of 1 (ideal: 4x).
+Scaling: 4 workers deliver 1.04x the throughput of 1 (ideal: 4x).
 
-### CPU jobs (29676 sha256 iterations, 10.4 ms on one core per section 1), 600 jobs per run
+### CPU jobs (32230 sha256 iterations, 10.4 ms on one core per section 1), 600 jobs per run
 
 | workers | throughput (jobs/s) | attempt latency p50 (ms) | p95 (ms) | p99 (ms) | extra executions |
 |---|---|---|---|---|---|
-| 1 | 89.3 [79.5-94.7] | 313.8 [313.7-333.0] | 564.2 [464.2-953.6] | 671.4 [498.6-1155.7] | 0 [0-0] |
-| 2 | 143.8 [141.4-178.7] | 346.8 [344.7-366.9] | 863.2 [389.7-1045.0] | 894.9 [400.5-1139.8] | 0 [0-0] |
-| 4 | 135.3 [98.3-196.0] | 735.6 [507.5-811.2] | 1095.2 [761.3-2667.7] | 1173.6 [819.5-2730.0] | 0 [0-0] |
+| 1 | 90.6 [79.3-92.0] | 17.8 [17.7-17.8] | 19.3 [18.7-19.6] | 21.0 [20.1-22.2] | 0 [0-0] |
+| 2 | 111.5 [96.2-172.7] | 19.7 [17.7-20.3] | 33.3 [23.7-45.0] | 58.6 [27.0-158.7] | 0 [0-0] |
+| 4 | 204.1 [158.7-225.3] | 23.9 [23.5-24.5] | 36.2 [32.5-41.6] | 58.1 [37.9-1072.4] | 0 [0-0] |
 
-Scaling: 4 workers deliver 1.52x the throughput of 1 (ideal: 4x).
+Scaling: 4 workers deliver 2.25x the throughput of 1 (ideal: 4x).
 
-Attempt latency (p50 314 ms for a 10 ms job) is mostly **queueing inside the worker**: up to 32 CPU jobs are in flight but each worker has 1 CPU child process, so they wait for it, and the job timeout and lease clock run while they wait. This is a known design gap (DESIGN.md promised a separate CPU limit); see README known limits.
+Attempt latency (p50 18 ms for a 10 ms job) shows almost no queueing inside the worker: CPU jobs wait in Redis, in their own stream, and are claimed only when a CPU process is nearly free (DESIGN.md s8.1).
+
+### CPU slots per worker
+
+Source: `PYTHONPATH=. uv run python -m bench.cpu_slots` -> `results/bench/cpu_slots.json`. One worker, 1 CPU process, 600 CPU jobs per run, median of 3 runs [min-max]. `QS_MAX_CPU_IN_FLIGHT` = how many CPU jobs the worker takes at once. Default is 2 per CPU process (one running, one on deck).
+
+| CPU slots | throughput (jobs/s) | attempt latency p50 (ms) | p99 (ms) |
+|---|---|---|---|
+| 1 | 52.3 [48.4-53.3] | 13.3 [13.2-13.4] | 18.7 [16.7-24.1] |
+| 2 | 76.8 [71.7-85.6] | 18.2 [18.0-18.3] | 40.8 [26.7-43.2] |
+| 3 | 86.5 [77.8-87.5] | 29.3 [29.2-29.6] | 40.8 [39.8-46.1] |
+| 4 | 81.8 [75.5-87.1] | 40.1 [39.3-40.7] | 80.2 [60.4-82.0] |
+| 8 | 78.5 [74.9-92.4] | 82.2 [81.4-89.4] | 298.3 [91.1-911.7] |
+
+Too few slots leave the CPU process idle during claim and commit round trips; beyond a couple, extra slots add latency and no throughput.
 
 ## 3. Failure tests: the invariant under real faults
 
@@ -94,22 +108,22 @@ Source: `QS_RESULTS_DIR=results/failures/runN uv run pytest -m failure` repeated
 
 | test | jobs | done / dead | lost jobs | jobs with >1 result | extra executions | recovery (s) |
 |---|---|---|---|---|---|---|
-| `kill9_worker_mid_job` | 200 [200-200] | 200 [200-200] / 0 [0-0] | 0 | 0 | 8 [8-8] | 5.93 [5.84-6.49] |
-| `redis_restart_aof` | 400 [400-400] | 400 [400-400] / 0 [0-0] | 0 | 0 | 0 [0-0] | 0.14 [0.09-0.15] |
-| `redis_restart_no_persistence` | 400 [400-400] | 400 [400-400] / 0 [0-0] | 0 | 0 | 0 [0-0] | 0.15 [0.14-0.90] |
-| `postgres_stopped` | 300 [300-300] | 300 [300-300] / 0 [0-0] | 0 | 0 | 16 [14-16] | 1.96 [0.10-2.12] |
-| `postgres_paused` | 300 [300-300] | 300 [300-300] / 0 [0-0] | 0 | 0 | 4 [3-5] | 0.08 [0.07-0.09] |
+| `kill9_worker_mid_job` | 200 [200-200] | 200 [200-200] / 0 [0-0] | 0 | 0 | 8 [7-8] | 5.83 [5.10-6.14] |
+| `redis_restart_aof` | 400 [400-400] | 400 [400-400] / 0 [0-0] | 0 | 0 | 0 [0-0] | 0.13 [0.05-0.13] |
+| `redis_restart_no_persistence` | 400 [400-400] | 400 [400-400] / 0 [0-0] | 0 | 0 | 0 [0-0] | 0.10 [0.08-0.19] |
+| `postgres_stopped` | 300 [300-300] | 300 [300-300] / 0 [0-0] | 0 | 0 | 16 [14-16] | 1.91 [1.85-2.26] |
+| `postgres_paused` | 300 [300-300] | 300 [300-300] / 0 [0-0] | 0 | 0 | 5 [3-6] | 0.10 [0.07-0.10] |
 | `postgres_slow_100ms` | 150 [150-150] | 150 [150-150] / 0 [0-0] | 0 | 0 | 0 [0-0] | - |
 | `poison_permanent` | 60 [60-60] | 59 [59-59] / 1 [1-1] | 0 | 0 | 0 [0-0] | - |
 | `poison_child_exit` | 60 [60-60] | 59 [59-59] / 1 [1-1] | 0 | 0 | 2 [2-2] | - |
 | `poison_hang` | 60 [60-60] | 59 [59-59] / 1 [1-1] | 0 | 0 | 2 [2-2] | - |
-| `poison_worker_exit` | 60 [60-60] | 59 [59-59] / 1 [1-1] | 0 | 0 | 8 [7-9] | - |
-| `api_flood` | 610 [610-624] | 610 [610-624] / 0 [0-0] | 0 | 0 | 0 [0-0] | - |
+| `poison_worker_exit` | 60 [60-60] | 59 [59-59] / 1 [1-1] | 0 | 0 | 10 [6-10] | - |
+| `api_flood` | 599 [594-650] | 599 [594-650] / 0 [0-0] | 0 | 0 | 0 [0-0] | - |
 | `postgres_out_of_connections` | 300 [300-300] | 300 [300-300] / 0 [0-0] | 0 | 0 | 0 [0-0] | - |
 
 "Lost jobs" and "jobs with >1 result" are 0 because the test fails otherwise (they are assertions, checked on every run), not because they are counted here.
 
-**API flood** (open loop, 300 req/s for 8 s, 4 procs): accepted (202) 610 [610-624], rejected with 429 1790 [1776-1790], no other status codes; request p99 70.6 [59.9-101.8] ms; peak queue depth 123 [123-124] against a limit of 100 (the limit is soft: admission uses a sampled depth).
+**API flood** (open loop, 300 req/s for 8 s, 4 procs): accepted (202) 599 [594-650], rejected with 429 1801 [1750-1806], no other status codes; request p99 104.5 [70.5-118.8] ms; peak queue depth 125 [123-127] against a limit of 100 (the limit is soft: admission uses a sampled depth).
 
 ### Pass rate over 3 runs
 

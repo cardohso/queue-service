@@ -3,18 +3,18 @@
   "jobs": 300,
   "done": 300,
   "dead": 0,
-  "executions": 314,
-  "extra_executions": 14,
-  "interrupted": 14,
+  "executions": 316,
+  "extra_executions": 16,
+  "interrupted": 16,
   "dead_reasons": {},
-  "recovery_s": 2.117651,
+  "recovery_s": 1.847271,
   "notes": {
     "client": {
       "202": 300,
       "503": 88
     },
     "outage_s": 5.0,
-    "worker_A_commit_gave_up": 8.0,
-    "worker_A_db_unavailable": 12.0
+    "worker_A_commit_gave_up": 7.0,
+    "worker_A_db_unavailable": 8.0
   }
 }

@@ -47,10 +47,11 @@ class Settings:
     cpu_workers: int = os.cpu_count() or 2
     # CPU jobs a worker takes at once (its CPU bulkhead). 0 = 2 * cpu_workers: one running and
     # one "on deck" per process, so a process is not idle during the next job's claim and the
-    # last job's commit. Measured (1 worker, 1 CPU process, ~10 ms jobs): 1 slot = 52 jobs/s
-    # (p50 13 ms), 2 = 72 (19 ms), 3 = 84 (27 ms), 8 = 86 (75 ms): more slots add latency, not
-    # throughput. Waiting inside the worker is bounded to about one job's duration; for very
-    # long CPU jobs (lease and timeout run while waiting) set it to cpu_workers.
+    # last job's commit. Measured (1 worker, 1 CPU process, ~10 ms jobs, docs/RESULTS.md): 1 slot
+    # = 52 jobs/s (p50 13 ms), 2 = 77 (18 ms), 3 = 87 (29 ms), 8 = 79 (82 ms): more slots add
+    # latency, not throughput. Waiting inside the worker is bounded to about one job's
+    # duration; for very long CPU jobs (lease and timeout run while waiting) set it to
+    # cpu_workers.
     max_cpu_in_flight: int = 0
     # Lease = visibility timeout. Heartbeat every lease/3 keeps live jobs from being reclaimed.
     lease_s: float = 30.0

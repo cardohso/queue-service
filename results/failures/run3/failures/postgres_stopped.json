@@ -7,7 +7,7 @@
   "extra_executions": 16,
   "interrupted": 16,
   "dead_reasons": {},
-  "recovery_s": 1.963825,
+  "recovery_s": 1.910288,
   "notes": {
     "client": {
       "202": 300,
@@ -15,6 +15,6 @@
     },
     "outage_s": 5.0,
     "worker_A_commit_gave_up": 8.0,
-    "worker_A_db_unavailable": 10.0
+    "worker_A_db_unavailable": 14.0
   }
 }

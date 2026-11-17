@@ -324,9 +324,11 @@ lease or timeout running, where any idle worker can take them.
 **Why two, not one (measured, `bench/cpu_slots.py`).** With exactly one slot per process the
 process idles during each job's claim and the previous job's commit: attempt latency became
 honest (p50 13 ms for a 10 ms job, from 314-386 ms) but one worker's throughput dropped from
-about 89 to 52 jobs/s. One running plus one "on deck" recovers most of it (72 jobs/s, p50 19
-ms); a third slot gets to 84 jobs/s at 27 ms; eight slots add no throughput and push p50 to
-75 ms. Two keeps in-worker waiting to about one job's duration. For very long CPU jobs, where
+about 89 to 52 jobs/s. One running plus one "on deck" recovers most of it (77 jobs/s, p50 18
+ms); a third slot reaches 87 jobs/s at 29 ms; eight slots add no throughput and push p50 to
+82 ms (numbers from RESULTS.md, median of 3 runs). End to end, the default gives one worker
+about 91 jobs/s at p50 18 ms for a 10 ms job. Two keeps in-worker waiting to about one job's
+duration. For very long CPU jobs, where
 the lease and timeout run during that wait, set `QS_MAX_CPU_IN_FLIGHT` to `cpu_workers`.
 The table is regenerated in RESULTS.md. CPU jobs can no longer use up the
 slots I/O jobs need. Admission control sums the depth of both streams.

@@ -7,26 +7,26 @@
   "extra_executions": 8,
   "interrupted": 8,
   "dead_reasons": {},
-  "recovery_s": 5.929686,
+  "recovery_s": 5.829884,
   "notes": {
     "client": {
       "202": 200
     },
-    "jobs_held_by_killed_worker": 6,
+    "jobs_held_by_killed_worker": 7,
     "lease_s": 2.0,
     "recovery_phases_s": {
       "jobs": 8,
       "detect": {
-        "min": 2.77,
-        "max": 3.41
+        "min": 2.69,
+        "max": 3.34
       },
       "claim_spread_after_first": {
         "min": 0.0,
-        "max": 2.54
+        "max": 2.5
       },
       "run": {
         "min": 0.3,
-        "max": 0.31
+        "max": 0.32
       }
     }
   }

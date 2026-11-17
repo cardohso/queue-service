@@ -3,11 +3,11 @@
   "jobs": 300,
   "done": 300,
   "dead": 0,
-  "executions": 316,
-  "extra_executions": 16,
-  "interrupted": 16,
+  "executions": 314,
+  "extra_executions": 14,
+  "interrupted": 14,
   "dead_reasons": {},
-  "recovery_s": 0.100261,
+  "recovery_s": 2.26276,
   "notes": {
     "client": {
       "202": 300,
