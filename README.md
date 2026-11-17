@@ -50,8 +50,10 @@ it is mid-job**, waits, and checks the claim against what Postgres actually hold
 PASS: every accepted job reached exactly one final state, none lost, none run twice to completion.
 ```
 
-The 18 extra executions are exactly the 18 jobs the killed worker held: each was taken over
-after its lease expired and ran again, once. Clean up with `docker compose down -v`.
+The extra executions are the jobs the killed worker had in flight: each was taken over after
+its lease expired and ran again, once (18 in the run above; the count varies a little per run,
+because the worker claims a few more jobs between the moment the script samples it and the
+kill). Clean up with `docker compose down -v`.
 
 Try the API yourself while it is up:
 
